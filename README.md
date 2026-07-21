@@ -9,6 +9,11 @@ never slows or breaks your app.
 
 ```bash
 composer require observera/laravel
+
+OR
+composer config repositories.observera vcs https://github.com/Observra/observera-laravel-sdk
+composer require observera/laravel:^1.0
+
 php artisan observera:install
 ```
 
