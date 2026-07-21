@@ -35,6 +35,8 @@ class ObserveraServiceProvider extends ServiceProvider
                 (string) $config['environment'],
                 (int) $config['batch_size'],
                 (string) $config['level'],
+                $config['queue'] ?? null,
+                (string) ($config['queue_name'] ?? 'default'),
             );
         });
     }
@@ -122,12 +124,21 @@ class ObserveraServiceProvider extends ServiceProvider
         // start times keyed by job id, set on JobProcessing and consumed on finish
         $jobStarts = [];
         $this->app['events']->listen(\Illuminate\Queue\Events\JobProcessing::class, function ($e) use (&$jobStarts) {
+            if ($this->isOwnJob($e->job)) {
+                return; // don't instrument our own ship job → no telemetry feedback loop
+            }
             $jobStarts[$e->job->getJobId() ?: spl_object_id($e->job)] = microtime(true);
         });
         $this->app['events']->listen(\Illuminate\Queue\Events\JobProcessed::class, function ($e) use ($shipper, &$jobStarts) {
+            if ($this->isOwnJob($e->job)) {
+                return;
+            }
             $shipper->recordJob($this->jobEvent($e, 'ok', $jobStarts));
         });
         $this->app['events']->listen(\Illuminate\Queue\Events\JobFailed::class, function ($e) use ($shipper, &$jobStarts) {
+            if ($this->isOwnJob($e->job)) {
+                return;
+            }
             $ex = $e->exception ?? null;
             $shipper->recordJob($this->jobEvent($e, 'failed', $jobStarts, $ex
                 ? $ex::class.' — '.$ex->getMessage()
@@ -175,6 +186,12 @@ class ObserveraServiceProvider extends ServiceProvider
      * @param  array<string, float>  $starts
      * @return array<string, mixed>
      */
+    /** Our own async ship job — never instrument it, or shipping telemetry ships telemetry forever. */
+    protected function isOwnJob(object $job): bool
+    {
+        return $job->resolveName() === \Observera\Laravel\Jobs\ShipEnvelope::class;
+    }
+
     protected function jobEvent(object $e, string $status, array &$starts, string $exception = ''): array
     {
         $job = $e->job;

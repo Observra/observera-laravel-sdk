@@ -22,4 +22,13 @@ return [
     // HTTP timeouts (seconds). Kept short — shipping must never slow the app.
     'timeout' => (float) env('OBSERVERA_TIMEOUT', 2.0),
     'connect_timeout' => (float) env('OBSERVERA_CONNECT_TIMEOUT', 1.0),
+
+    // Ship off-thread via a queue connection instead of a blocking HTTP POST on
+    // every request. Strongly recommended in production (esp. Octane): set to a
+    // real connection like "redis" or "database". Leave null to ship inline
+    // (synchronous — simplest, but the request waits on the network round-trip).
+    'queue' => env('OBSERVERA_QUEUE'),
+
+    // Queue name for the ship job when 'queue' is set.
+    'queue_name' => env('OBSERVERA_QUEUE_NAME', 'default'),
 ];

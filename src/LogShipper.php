@@ -2,6 +2,7 @@
 
 namespace Observera\Laravel;
 
+use Observera\Laravel\Jobs\ShipEnvelope;
 use Observera\Laravel\Transport\Client;
 
 /**
@@ -53,6 +54,8 @@ class LogShipper
         protected string $environment,
         protected int $batchSize = 50,
         protected string $minLevel = 'debug',
+        protected ?string $queue = null,
+        protected string $queueName = 'default',
     ) {}
 
     /**
@@ -184,7 +187,18 @@ class LogShipper
         $this->flushing = true;
         $this->logs = $this->requests = $this->exceptions = $this->httpOut = $this->queries = $this->spans = $this->jobs = $this->cache = $this->scheduled = [];
 
-        $this->client->sendEnvelope($env);
+        if ($this->queue !== null) {
+            // Off-thread: push to the queue and return immediately. Guarded so a
+            // broker hiccup can never break the app (same promise as the sync path).
+            try {
+                ShipEnvelope::dispatch($env)->onConnection($this->queue)->onQueue($this->queueName);
+            } catch (\Throwable) {
+                // fall back to inline delivery if the queue push itself fails
+                $this->client->sendEnvelope($env);
+            }
+        } else {
+            $this->client->sendEnvelope($env);
+        }
 
         $this->flushing = false;
     }
