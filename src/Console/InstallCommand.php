@@ -18,7 +18,7 @@ class InstallCommand extends Command
         $this->newLine();
         $this->line('Add to your .env:');
         $this->line('  <fg=gray>OBSERVERA_KEY=</><fg=yellow>obs_live_…</>   # from your Observera project → SDK keys');
-        $this->line('  <fg=gray>OBSERVERA_ENDPOINT=</>https://ingest.observera.io');
+        $this->line('  <fg=gray>OBSERVERA_ENDPOINT=</>https://api.observera.clipnexor.com');
         $this->newLine();
         $this->line('That\'s it — all Log::* calls now ship to Observera automatically.');
         $this->newLine();

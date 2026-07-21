@@ -4,8 +4,8 @@ return [
     // Ingest key from Observera → project → environment (obs_live_… / obs_test_…).
     'key' => env('OBSERVERA_KEY'),
 
-    // Ingest base URL. Prod: https://ingest.observera.io. Local Docker: http://api.observera.test
-    'endpoint' => env('OBSERVERA_ENDPOINT', 'https://ingest.observera.io'),
+    // Ingest base URL. Prod: https://api.observera.clipnexor.com. Local Docker: http://api.observera.test
+    'endpoint' => env('OBSERVERA_ENDPOINT', 'https://api.observera.clipnexor.com'),
 
     // Logical environment label attached to every event.
     'environment' => env('OBSERVERA_ENV', env('APP_ENV', 'production')),

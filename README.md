@@ -16,8 +16,7 @@ Then set in `.env`:
 
 ```dotenv
 OBSERVERA_KEY=obs_live_…              # Observera → project → SDK keys
-OBSERVERA_ENDPOINT=https://ingest.observera.io
-# local Docker stack: OBSERVERA_ENDPOINT=http://api.observera.test
+# OBSERVERA_ENDPOINT is optional — defaults to the hosted ingest endpoint.
 ```
 
 That's it. `Log::error('Payment failed', ['order' => $id])` now appears in
