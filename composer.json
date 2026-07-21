@@ -1,0 +1,27 @@
+{
+    "name": "observera/laravel",
+    "description": "Ship logs and telemetry from your Laravel app to Observera.",
+    "type": "library",
+    "version": "1.0.0",
+    "license": "MIT",
+    "keywords": ["laravel", "observability", "logging", "monitoring", "observera"],
+    "require": {
+        "php": "^8.2",
+        "illuminate/support": "^11.0|^12.0|^13.0",
+        "guzzlehttp/guzzle": "^7.5"
+    },
+    "autoload": {
+        "psr-4": {
+            "Observera\\Laravel\\": "src/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Observera\\Laravel\\ObserveraServiceProvider"
+            ]
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
