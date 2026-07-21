@@ -23,21 +23,22 @@ Then set in `.env`:
 OBSERVERA_KEY=obs_live_…              # Observera → project → SDK keys
 # OBSERVERA_ENDPOINT is optional — defaults to the hosted ingest endpoint.
 
-# Recommended in production: ship off-thread via a queue instead of a blocking
-# HTTP POST on every request. Set to a real queue connection (redis/database)
-# and run a worker. Leave unset to ship inline (synchronous).
+# Shipping runs off-thread via a queue by default (connection "database") so it
+# never blocks requests. Override to Redis, or "sync" to ship inline.
 # OBSERVERA_QUEUE=redis
 ```
 
 That's it. `Log::error('Payment failed', ['order' => $id])` now appears in
 Observera under Logs, filterable by level / channel / search / trace id.
 
-> **Performance.** By default the SDK ships **inline** on request/worker
-> shutdown — the request waits on the network round-trip (up to `OBSERVERA_TIMEOUT`,
-> 2s). On a slow or unreachable endpoint, or under Octane, this adds latency.
-> Set `OBSERVERA_QUEUE=redis` (with a running queue worker) to ship
-> asynchronously — the request returns immediately and delivery happens on the
-> worker. The ship job is excluded from instrumentation, so it never loops.
+> **Performance.** Shipping is **async by default** — the envelope is dispatched
+> to the queue (connection `database`) and delivered by a worker, so requests
+> never wait on the network round-trip. Requirements: the `database` queue needs
+> a `jobs` table (`php artisan queue:table && php artisan migrate`) and a running
+> `php artisan queue:work`. Prefer Redis? Set `OBSERVERA_QUEUE=redis`. Want the
+> old inline behaviour? Set `OBSERVERA_QUEUE=sync`. If the queue store is missing,
+> the SDK safely falls back to inline delivery. The ship job is excluded from
+> instrumentation, so it never loops.
 
 Verify the connection (completes the onboarding "connection test"):
 

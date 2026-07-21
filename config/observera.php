@@ -24,10 +24,11 @@ return [
     'connect_timeout' => (float) env('OBSERVERA_CONNECT_TIMEOUT', 1.0),
 
     // Ship off-thread via a queue connection instead of a blocking HTTP POST on
-    // every request. Strongly recommended in production (esp. Octane): set to a
-    // real connection like "redis" or "database". Leave null to ship inline
-    // (synchronous — simplest, but the request waits on the network round-trip).
-    'queue' => env('OBSERVERA_QUEUE'),
+    // every request (esp. important under Octane). Defaults to "database" so
+    // shipping is async out of the box; set OBSERVERA_QUEUE=redis for Redis, or
+    // "sync"/null to ship inline. If the connection's backing store is missing
+    // (e.g. no `jobs` table), the SDK safely falls back to inline delivery.
+    'queue' => env('OBSERVERA_QUEUE', 'database'),
 
     // Queue name for the ship job when 'queue' is set.
     'queue_name' => env('OBSERVERA_QUEUE_NAME', 'default'),

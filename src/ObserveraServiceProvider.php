@@ -35,7 +35,7 @@ class ObserveraServiceProvider extends ServiceProvider
                 (string) $config['environment'],
                 (int) $config['batch_size'],
                 (string) $config['level'],
-                $config['queue'] ?? null,
+                ($config['queue'] ?? null) ?: null, // empty string → inline
                 (string) ($config['queue_name'] ?? 'default'),
             );
         });
