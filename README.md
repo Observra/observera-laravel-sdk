@@ -26,6 +26,10 @@ OBSERVERA_KEY=obs_live_…              # Observera → project → SDK keys
 # Shipping runs off-thread via a queue by default (connection "database") so it
 # never blocks requests. Override to Redis, or "sync" to ship inline.
 # OBSERVERA_QUEUE=redis
+
+# Paths never shipped (health checks / probes). Laravel wildcards, comma-separated.
+# Default: up,up/*,health,healthz,ping,telescope*,horizon*,_debugbar/*
+# OBSERVERA_IGNORE_PATHS=up,health,metrics
 ```
 
 That's it. `Log::error('Payment failed', ['order' => $id])` now appears in

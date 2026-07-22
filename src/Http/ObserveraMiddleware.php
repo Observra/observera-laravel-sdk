@@ -29,6 +29,13 @@ class ObserveraMiddleware
 
     public function terminate(Request $request, Response $response): void
     {
+        // Skip health checks / probes (container HEALTHCHECK, load balancers) —
+        // otherwise they flood the request feed. Configurable via ignore_paths.
+        $ignore = (array) config('observera.ignore_paths', []);
+        if ($ignore !== [] && $request->is(...$ignore)) {
+            return;
+        }
+
         $route = $request->route();
         $start = defined('LARAVEL_START') ? LARAVEL_START : $request->server('REQUEST_TIME_FLOAT');
         $duration = $start ? (microtime(true) - (float) $start) * 1000 : 0;

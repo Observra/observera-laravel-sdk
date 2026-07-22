@@ -32,4 +32,12 @@ return [
 
     // Queue name for the ship job when 'queue' is set.
     'queue_name' => env('OBSERVERA_QUEUE_NAME', 'default'),
+
+    // Request paths to ignore (never shipped) — health checks / probes that
+    // container HEALTHCHECKs and load balancers hit constantly. Supports Laravel
+    // wildcards (e.g. "telescope*"). Comma-separated in the env var.
+    'ignore_paths' => array_values(array_filter(array_map('trim', explode(
+        ',',
+        (string) env('OBSERVERA_IGNORE_PATHS', 'up,up/*,health,healthz,ping,telescope*,horizon*,_debugbar/*'),
+    )), fn ($p) => $p !== '')),
 ];
