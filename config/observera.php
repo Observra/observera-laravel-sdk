@@ -33,6 +33,11 @@ return [
     // Queue name for the ship job when 'queue' is set.
     'queue_name' => env('OBSERVERA_QUEUE_NAME', 'default'),
 
+    // Max captured body size in BYTES (outbound HTTP req/resp, job payloads).
+    // Bodies above this are truncated on a UTF-8 boundary with a marker. Keep it
+    // bounded — shipping multi-MB bodies bloats storage and slows ingest.
+    'max_body' => (int) env('OBSERVERA_MAX_BODY', 65536),
+
     // Request paths to ignore (never shipped) — health checks / probes that
     // container HEALTHCHECKs and load balancers hit constantly. Supports Laravel
     // wildcards (e.g. "telescope*"). Comma-separated in the env var.

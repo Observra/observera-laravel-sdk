@@ -30,6 +30,10 @@ OBSERVERA_KEY=obs_live_…              # Observera → project → SDK keys
 # Paths never shipped (health checks / probes). Laravel wildcards, comma-separated.
 # Default: up,up/*,health,healthz,ping,telescope*,horizon*,_debugbar/*
 # OBSERVERA_IGNORE_PATHS=up,health,metrics
+
+# Max captured body size in bytes (outbound HTTP req/resp, job payloads). Larger
+# bodies are truncated on a UTF-8 boundary. Default 65536 (64 KB).
+# OBSERVERA_MAX_BODY=65536
 ```
 
 That's it. `Log::error('Payment failed', ['order' => $id])` now appears in

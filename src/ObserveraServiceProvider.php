@@ -338,12 +338,29 @@ class ObserveraServiceProvider extends ServiceProvider
 
     /**
      * Cap payloads so we never ship a huge body. Truncated bodies get a marker.
+     *
+     * Cutting is UTF-8 aware: `mb_strcut` trims to a byte budget WITHOUT splitting
+     * a multibyte character (byte `substr` would corrupt Japanese/emoji etc., and
+     * an invalid-UTF-8 tail makes json_encode fail on the whole envelope → lost
+     * data). Any invalid bytes in the source are also sanitised for the same reason.
      */
-    protected function capBody(string $body, int $max = 8192): string
+    protected function capBody(string $body, ?int $max = null): string
     {
-        return strlen($body) > $max
-            ? substr($body, 0, $max)."\n… (truncated ".strlen($body).' bytes)'
-            : $body;
+        $max ??= (int) config('observera.max_body', 65536);
+
+        // Guarantee valid UTF-8 so the JSON envelope always encodes.
+        if (! mb_check_encoding($body, 'UTF-8')) {
+            $sub = mb_substitute_character();
+            mb_substitute_character(0xFFFD);
+            $body = mb_convert_encoding($body, 'UTF-8', 'UTF-8');
+            mb_substitute_character($sub);
+        }
+
+        if (strlen($body) <= $max) {
+            return $body;
+        }
+
+        return mb_strcut($body, 0, $max, 'UTF-8')."\n… (truncated ".strlen($body).' bytes)';
     }
 
     protected function recordException(LogShipper $shipper, RequestMonitor $monitor, \Throwable $ex): void
