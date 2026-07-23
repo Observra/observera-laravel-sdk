@@ -41,6 +41,30 @@ class ObserveraServiceProvider extends ServiceProvider
         });
     }
 
+    /**
+     * Best-effort release id from the app's git checkout (short commit sha).
+     * Read once at boot; empty string if no readable .git (e.g. deploy without it).
+     */
+    protected function detectRelease(): string
+    {
+        try {
+            $head = base_path('.git/HEAD');
+            if (! is_readable($head)) {
+                return '';
+            }
+            $ref = trim((string) file_get_contents($head));
+            if (str_starts_with($ref, 'ref:')) {
+                $refFile = base_path('.git/'.trim(substr($ref, 4)));
+
+                return is_readable($refFile) ? substr(trim((string) file_get_contents($refFile)), 0, 12) : '';
+            }
+
+            return substr($ref, 0, 12); // detached HEAD → the sha itself
+        } catch (\Throwable) {
+            return '';
+        }
+    }
+
     public function boot(): void
     {
         $this->publishes([
@@ -49,6 +73,13 @@ class ObserveraServiceProvider extends ServiceProvider
 
         if ($this->app->runningInConsole()) {
             $this->commands([InstallCommand::class, TestCommand::class]);
+        }
+
+        // Auto-resolve the release (for release health) once at boot if unset:
+        // OBSERVERA_RELEASE → APP_VERSION → current git commit sha. So a deploy's
+        // release is detected automatically without hardcoding a version.
+        if ((string) config('observera.release', '') === '') {
+            config(['observera.release' => $this->detectRelease()]);
         }
 
         $config = $this->app['config']['observera'];

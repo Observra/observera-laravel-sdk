@@ -10,8 +10,9 @@ return [
     // Logical environment label attached to every event.
     'environment' => env('OBSERVERA_ENV', env('APP_ENV', 'production')),
 
-    // Release identifier (git sha / version) — powers release health + adoption.
-    // Set to your deploy's commit sha or version tag.
+    // Release identifier — powers release health + adoption. Optional: if unset,
+    // the SDK auto-detects the current git commit sha at boot. Override only if
+    // you want a custom label (e.g. a version tag) or your deploy has no .git.
     'release' => env('OBSERVERA_RELEASE', env('APP_VERSION', '')),
 
     // Master switch. Auto-disabled when no key is set.
