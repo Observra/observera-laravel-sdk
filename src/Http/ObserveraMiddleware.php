@@ -43,17 +43,33 @@ class ObserveraMiddleware
 
         $routeUri = $route ? '/'.ltrim($route->uri(), '/') : '/'.ltrim($request->path(), '/');
 
+        $status = $response->getStatusCode();
+        $userId = (string) (optional($request->user())->getAuthIdentifier() ?? '');
+
         $this->shipper->recordRequest([
             'method' => $request->getMethod(),
             'route' => $routeUri,
             'controller_action' => $route?->getActionName() ?? '',
-            'status' => $response->getStatusCode(),
+            'status' => $status,
             'duration_ms' => round($duration, 1),
             'db_ms' => round($this->monitor->dbTimeMs(), 1),
             'db_queries' => $this->monitor->dbQueries(),
             'memory_mb' => round(memory_get_peak_usage(true) / 1048576, 1),
             'trace_id' => $trace,
-            'user_id' => (string) (optional($request->user())->getAuthIdentifier() ?? ''),
+            'user_id' => $userId,
+        ]);
+
+        // ---- release health: one session touch per request ----
+        // Session = web session id when present, else a stable per-user/client
+        // key (server buckets these). Crashed = unhandled 5xx.
+        $this->shipper->recordSession([
+            'session_key' => $this->sessionKey($request, $userId),
+            'distinct_id' => $userId !== ''
+                ? 'user:'.$userId
+                : 'anon:'.substr(sha1(($request->ip() ?? '').'|'.((string) $request->userAgent())), 0, 16),
+            'release' => (string) config('observera.release', ''),
+            'status' => $status >= 500 ? 'crashed' : 'ok',
+            'timestamp' => round(microtime(true) * 1000),
         ]);
 
         // per-query telemetry
@@ -101,6 +117,21 @@ class ObserveraMiddleware
         $this->shipper->recordSpans($spans);
 
         $this->shipper->flush();
+    }
+
+    /**
+     * Session key: the Laravel web session id when one is active (real user
+     * session), otherwise a stable per-user (or per-client) key for stateless
+     * API traffic. The server time-buckets the API keys into sessions.
+     */
+    protected function sessionKey(Request $request, string $userId): string
+    {
+        if ($request->hasSession() && $request->session()->isStarted()) {
+            return 'web:'.$request->session()->getId();
+        }
+        $base = $userId !== '' ? $userId : ($request->ip() ?? '').'|'.((string) $request->userAgent());
+
+        return 'api:'.substr(sha1($base), 0, 24);
     }
 
     protected function summariseSql(string $sql): string

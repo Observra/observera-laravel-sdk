@@ -40,6 +40,9 @@ class LogShipper
     /** @var array<int, array<string, mixed>> */
     protected array $scheduled = [];
 
+    /** @var array<int, array<string, mixed>> */
+    protected array $sessions = [];
+
     // reentrancy guard: shipping must not record its own log lines
     protected bool $flushing = false;
 
@@ -162,6 +165,15 @@ class LogShipper
         $this->maybeFlush();
     }
 
+    public function recordSession(array $session): void
+    {
+        if ($this->flushing) {
+            return;
+        }
+        $this->sessions[] = $session;
+        $this->maybeFlush();
+    }
+
     public function flush(): void
     {
         if ($this->flushing) {
@@ -178,6 +190,7 @@ class LogShipper
             'jobs' => $this->jobs,
             'cache' => $this->cache,
             'scheduled' => $this->scheduled,
+            'sessions' => $this->sessions,
         ]);
 
         if ($env === []) {
@@ -185,7 +198,7 @@ class LogShipper
         }
 
         $this->flushing = true;
-        $this->logs = $this->requests = $this->exceptions = $this->httpOut = $this->queries = $this->spans = $this->jobs = $this->cache = $this->scheduled = [];
+        $this->logs = $this->requests = $this->exceptions = $this->httpOut = $this->queries = $this->spans = $this->jobs = $this->cache = $this->scheduled = $this->sessions = [];
 
         if ($this->queue !== null) {
             // Off-thread: push to the queue and return immediately. Guarded so a
@@ -207,7 +220,7 @@ class LogShipper
     {
         $total = count($this->logs) + count($this->requests) + count($this->exceptions)
             + count($this->httpOut) + count($this->queries) + count($this->spans) + count($this->jobs)
-            + count($this->cache) + count($this->scheduled);
+            + count($this->cache) + count($this->scheduled) + count($this->sessions);
         if ($total >= $this->batchSize) {
             $this->flush();
         }
