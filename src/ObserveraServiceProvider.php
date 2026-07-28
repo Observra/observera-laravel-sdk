@@ -174,6 +174,11 @@ class ObserveraServiceProvider extends ServiceProvider
             $shipper->recordJob($this->jobEvent($e, 'failed', $jobStarts, $ex
                 ? $ex::class.' — '.$ex->getMessage()
                 : ''));
+
+            // Ship failures immediately: a queue:work process never fires the app's
+            // terminating callbacks, so a buffered failure would otherwise wait for
+            // batch_size or for the worker to exit (--max-time, up to an hour).
+            $shipper->flush();
         });
 
         // ---- cache operations (hit/miss/write/forget) ----
@@ -195,11 +200,16 @@ class ObserveraServiceProvider extends ServiceProvider
         $this->app['events']->listen(\Illuminate\Console\Events\ScheduledTaskFinished::class, function ($e) use ($shipper, $monitor) {
             $exit = (int) ($e->task->exitCode ?? 0);
             $shipper->recordScheduled($this->scheduledRun($e->task, $exit === 0 ? 'ok' : 'failed', $monitor, round($e->runtime * 1000, 1), $exit));
+
+            if ($exit !== 0) {
+                $shipper->flush(); // same reason as job failures: schedule:work is long-lived
+            }
         });
         $this->app['events']->listen(\Illuminate\Console\Events\ScheduledTaskFailed::class, function ($e) use ($shipper, $monitor) {
             $ex = $e->exception ?? null;
             $shipper->recordScheduled($this->scheduledRun($e->task, 'failed', $monitor, 0, 1,
                 $ex ? $ex::class.' — '.$ex->getMessage() : ''));
+            $shipper->flush();
         });
         $this->app['events']->listen(\Illuminate\Console\Events\ScheduledTaskSkipped::class, function ($e) use ($shipper, $monitor) {
             $shipper->recordScheduled($this->scheduledRun($e->task, 'skipped', $monitor, 0, 0));
@@ -408,6 +418,7 @@ class ObserveraServiceProvider extends ServiceProvider
                 'php_version' => PHP_VERSION,
                 'server' => gethostname() ?: '',
             ],
+            'release' => (string) config('observera.release', ''),
             'trace_id' => $monitor->traceId,
             'method' => $request?->method(),
             'route' => $request?->route()?->uri() ? '/'.ltrim($request->route()->uri(), '/') : $request?->path(),
