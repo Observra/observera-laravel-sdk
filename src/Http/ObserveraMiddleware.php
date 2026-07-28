@@ -45,6 +45,9 @@ class ObserveraMiddleware
 
         $status = $response->getStatusCode();
         $userId = (string) (optional($request->user())->getAuthIdentifier() ?? '');
+        // same key release health already uses — carried on the request event too
+        // so the server can group a visitor's requests into one session (replay)
+        $sessionKey = $this->sessionKey($request, $userId);
 
         $this->shipper->recordRequest([
             'method' => $request->getMethod(),
@@ -57,13 +60,15 @@ class ObserveraMiddleware
             'memory_mb' => round(memory_get_peak_usage(true) / 1048576, 1),
             'trace_id' => $trace,
             'user_id' => $userId,
+            'session_key' => $sessionKey,
+            'user_agent' => (string) $request->userAgent(),
         ]);
 
         // ---- release health: one session touch per request ----
         // Session = web session id when present, else a stable per-user/client
         // key (server buckets these). Crashed = unhandled 5xx.
         $this->shipper->recordSession([
-            'session_key' => $this->sessionKey($request, $userId),
+            'session_key' => $sessionKey,
             'distinct_id' => $userId !== ''
                 ? 'user:'.$userId
                 : 'anon:'.substr(sha1(($request->ip() ?? '').'|'.((string) $request->userAgent())), 0, 16),
