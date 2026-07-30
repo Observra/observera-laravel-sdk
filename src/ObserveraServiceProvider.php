@@ -11,6 +11,7 @@ use Illuminate\Support\ServiceProvider;
 use Observera\Laravel\Console\InstallCommand;
 use Observera\Laravel\Console\TestCommand;
 use Observera\Laravel\Http\ObserveraMiddleware;
+use Observera\Laravel\Instrumentation\Identity;
 use Observera\Laravel\Instrumentation\RequestMonitor;
 use Observera\Laravel\Transport\Client;
 
@@ -21,6 +22,7 @@ class ObserveraServiceProvider extends ServiceProvider
         $this->mergeConfigFrom(__DIR__.'/../config/observera.php', 'observera');
 
         $this->app->singleton(RequestMonitor::class);
+        $this->app->singleton(Identity::class);
 
         $this->app->singleton(LogShipper::class, function ($app) {
             $config = $app['config']['observera'];
@@ -89,17 +91,18 @@ class ObserveraServiceProvider extends ServiceProvider
 
         $shipper = $this->app->make(LogShipper::class);
         $monitor = $this->app->make(RequestMonitor::class);
+        $identity = $this->app->make(Identity::class);
 
         // ---- logs (+ exceptions carried in log context) ----
-        $this->app['events']->listen(MessageLogged::class, function (MessageLogged $e) use ($shipper, $monitor) {
+        $this->app['events']->listen(MessageLogged::class, function (MessageLogged $e) use ($shipper, $monitor, $identity) {
             $context = $e->context ?? [];
             $context['trace_id'] ??= $monitor->traceId;
 
-            $shipper->record($e->level, $e->message, $context);
+            $shipper->record($e->level, $e->message, $context, $identity->current());
 
             // Laravel reports exceptions as error logs with context.exception — split those out
             if (isset($context['exception']) && $context['exception'] instanceof \Throwable) {
-                $this->recordException($shipper, $monitor, $context['exception']);
+                $this->recordException($shipper, $monitor, $identity, $context['exception']);
             }
         });
 
@@ -154,7 +157,10 @@ class ObserveraServiceProvider extends ServiceProvider
         // ---- queue jobs (run telemetry: duration, attempts, failures) ----
         // start times keyed by job id, set on JobProcessing and consumed on finish
         $jobStarts = [];
-        $this->app['events']->listen(\Illuminate\Queue\Events\JobProcessing::class, function ($e) use (&$jobStarts) {
+        $this->app['events']->listen(\Illuminate\Queue\Events\JobProcessing::class, function ($e) use (&$jobStarts, $identity) {
+            // long-lived worker: whoever was authenticated last job is not this one
+            $identity->reset();
+
             if ($this->isOwnJob($e->job)) {
                 return; // don't instrument our own ship job → no telemetry feedback loop
             }
@@ -274,8 +280,13 @@ class ObserveraServiceProvider extends ServiceProvider
 
         $output = '';
         $file = $task->output ?? null;
-        if (is_string($file) && $file !== '' && $file !== '/dev/null' && is_readable($file) && filesize($file) < 65536) {
-            $output = $this->capBody((string) @file_get_contents($file), 2000);
+        // Follows the same max_body policy as every other payload — a truncated
+        // cron log is the one you cannot debug from.
+        if (is_string($file) && $file !== '' && $file !== '/dev/null' && is_readable($file)) {
+            $limit = (int) config('observera.max_output', 0);
+            if ($limit <= 0 || filesize($file) <= $limit) {
+                $output = $this->capBody((string) @file_get_contents($file));
+            }
         }
 
         return [
@@ -378,16 +389,20 @@ class ObserveraServiceProvider extends ServiceProvider
     }
 
     /**
-     * Cap payloads so we never ship a huge body. Truncated bodies get a marker.
+     * Sanitise a payload for shipping, and cap it only if a cap is configured.
      *
-     * Cutting is UTF-8 aware: `mb_strcut` trims to a byte budget WITHOUT splitting
+     * `max_body = 0` means capture in full — nothing is trimmed. That is what you
+     * want when the payload IS the evidence (a third-party response you need to
+     * replay), and it is the default.
+     *
+     * Cutting, when a cap applies, is UTF-8 aware: `mb_strcut` trims to a byte budget WITHOUT splitting
      * a multibyte character (byte `substr` would corrupt Japanese/emoji etc., and
      * an invalid-UTF-8 tail makes json_encode fail on the whole envelope → lost
      * data). Any invalid bytes in the source are also sanitised for the same reason.
      */
     protected function capBody(string $body, ?int $max = null): string
     {
-        $max ??= (int) config('observera.max_body', 65536);
+        $max ??= (int) config('observera.max_body', 0);
 
         // Guarantee valid UTF-8 so the JSON envelope always encodes.
         if (! mb_check_encoding($body, 'UTF-8')) {
@@ -397,16 +412,18 @@ class ObserveraServiceProvider extends ServiceProvider
             mb_substitute_character($sub);
         }
 
-        if (strlen($body) <= $max) {
+        // 0 (or negative) disables the cap — store everything.
+        if ($max <= 0 || strlen($body) <= $max) {
             return $body;
         }
 
         return mb_strcut($body, 0, $max, 'UTF-8')."\n… (truncated ".strlen($body).' bytes)';
     }
 
-    protected function recordException(LogShipper $shipper, RequestMonitor $monitor, \Throwable $ex): void
+    protected function recordException(LogShipper $shipper, RequestMonitor $monitor, Identity $identity, \Throwable $ex): void
     {
         $request = request();
+        $user = $identity->current();
 
         $shipper->recordException([
             'class' => $ex::class,
@@ -420,6 +437,9 @@ class ObserveraServiceProvider extends ServiceProvider
             ],
             'release' => (string) config('observera.release', ''),
             'trace_id' => $monitor->traceId,
+            'user_id' => $user['id'],
+            'user_email' => $user['email'],
+            'user_name' => $user['name'],
             'method' => $request?->method(),
             'route' => $request?->route()?->uri() ? '/'.ltrim($request->route()->uri(), '/') : $request?->path(),
             'action' => $request?->route()?->getActionName(),

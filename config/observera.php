@@ -39,9 +39,23 @@ return [
     'queue_name' => env('OBSERVERA_QUEUE_NAME', 'default'),
 
     // Max captured body size in BYTES (outbound HTTP req/resp, job payloads).
-    // Bodies above this are truncated on a UTF-8 boundary with a marker. Keep it
-    // bounded — shipping multi-MB bodies bloats storage and slows ingest.
-    'max_body' => (int) env('OBSERVERA_MAX_BODY', 65536),
+    //
+    // 0 = capture in full, nothing truncated. That is the default, because a
+    // truncated third-party response is usually the one you needed to read.
+    //
+    // Set a byte budget only if payload size becomes a real problem: bodies over
+    // it are cut on a UTF-8 boundary and marked. Note the ingest endpoint also
+    // enforces PHP's post_max_size, so an envelope larger than that is rejected
+    // whole — raise both together if you capture very large payloads.
+    'max_body' => (int) env('OBSERVERA_MAX_BODY', 0),
+
+    // Max scheduled-task output to read from disk, in BYTES. 0 = no limit.
+    'max_output' => (int) env('OBSERVERA_MAX_OUTPUT', 0),
+
+    // Attributes read off the authenticated user for `user_email` / `user_name`.
+    // Override if your user model names them differently.
+    'user_email_attribute' => env('OBSERVERA_USER_EMAIL_ATTRIBUTE', 'email'),
+    'user_name_attribute' => env('OBSERVERA_USER_NAME_ATTRIBUTE', 'name'),
 
     // Request paths to ignore (never shipped) — health checks / probes that
     // container HEALTHCHECKs and load balancers hit constantly. Supports Laravel

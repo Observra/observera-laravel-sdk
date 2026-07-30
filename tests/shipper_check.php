@@ -84,4 +84,25 @@ $sh5->flush();
 assert($s5->sent[0]['requests'][0]['session_key'] === 'web:abc123', 'session_key survives the envelope');
 assert($s5->sent[0]['requests'][0]['user_agent'] === 'Mozilla/5.0 (iPhone)', 'user_agent survives the envelope');
 
+// identity rides every log line — an id alone is not actionable in a dashboard
+$s6 = new FakeClient;
+$sh6 = new LogShipper($s6, 'production', batchSize: 10, minLevel: 'debug');
+$sh6->record('error', 'Payment failed', ['trace_id' => 't9'], [
+    'id' => '4812', 'email' => 'buyer@example.com', 'name' => 'Ada Byron',
+]);
+$sh6->flush();
+$log = $s6->sent[0]['logs'][0];
+assert($log['user_id'] === '4812', 'user id on the log line');
+assert($log['user_email'] === 'buyer@example.com', 'user email on the log line');
+assert($log['user_name'] === 'Ada Byron', 'user name on the log line');
+
+// unauthenticated traffic: empty strings, never missing keys
+$s7 = new FakeClient;
+$sh7 = new LogShipper($s7, 'production', batchSize: 10, minLevel: 'debug');
+$sh7->record('info', 'cron tick');
+$sh7->flush();
+$anon = $s7->sent[0]['logs'][0];
+assert($anon['user_email'] === '', 'anonymous log carries an empty email, not a missing key');
+assert(array_key_exists('user_id', $anon), 'the key is always present');
+
 echo "shipper_check OK\n";

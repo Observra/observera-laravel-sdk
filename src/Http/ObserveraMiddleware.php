@@ -4,6 +4,7 @@ namespace Observera\Laravel\Http;
 
 use Closure;
 use Illuminate\Http\Request;
+use Observera\Laravel\Instrumentation\Identity;
 use Observera\Laravel\Instrumentation\RequestMonitor;
 use Observera\Laravel\LogShipper;
 use Symfony\Component\HttpFoundation\Response;
@@ -18,6 +19,7 @@ class ObserveraMiddleware
     public function __construct(
         protected RequestMonitor $monitor,
         protected LogShipper $shipper,
+        protected Identity $identity,
     ) {}
 
     public function handle(Request $request, Closure $next): Response
@@ -44,7 +46,8 @@ class ObserveraMiddleware
         $routeUri = $route ? '/'.ltrim($route->uri(), '/') : '/'.ltrim($request->path(), '/');
 
         $status = $response->getStatusCode();
-        $userId = (string) (optional($request->user())->getAuthIdentifier() ?? '');
+        $user = $this->identity->current();
+        $userId = $user['id'];
         // same key release health already uses — carried on the request event too
         // so the server can group a visitor's requests into one session (replay)
         $sessionKey = $this->sessionKey($request, $userId);
@@ -60,6 +63,8 @@ class ObserveraMiddleware
             'memory_mb' => round(memory_get_peak_usage(true) / 1048576, 1),
             'trace_id' => $trace,
             'user_id' => $userId,
+            'user_email' => $user['email'],
+            'user_name' => $user['name'],
             'session_key' => $sessionKey,
             'user_agent' => (string) $request->userAgent(),
         ]);

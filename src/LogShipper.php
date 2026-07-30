@@ -63,8 +63,11 @@ class LogShipper
 
     /**
      * Record one log line (from the MessageLogged event). Cheap: buffers only.
+     *
+     * @param  array{id?: string, email?: string, name?: string}  $user  authenticated
+     *         identity, so a log line says WHO it happened to and not just what
      */
-    public function record(string $level, string $message, array $context = []): void
+    public function record(string $level, string $message, array $context = [], array $user = []): void
     {
         if ($this->flushing || ! $this->passesLevel($level)) {
             return;
@@ -77,6 +80,9 @@ class LogShipper
             'context' => $this->scrub($context),
             'file' => '',
             'trace_id' => (string) ($context['trace_id'] ?? ''),
+            'user_id' => (string) ($user['id'] ?? ''),
+            'user_email' => (string) ($user['email'] ?? ''),
+            'user_name' => (string) ($user['name'] ?? ''),
             'timestamp' => round(microtime(true) * 1000),
         ];
 
