@@ -7,15 +7,40 @@ never slows or breaks your app.
 
 ## Install
 
+Not on Packagist — installed straight from the repo. Add it to your app's
+`composer.json`:
+
+```json
+    "repositories": {
+        "observera": {
+            "type": "vcs",
+            "url": "https://github.com/Observra/observera-laravel-sdk"
+        }
+    }
+```
+
+then track `main`:
+
 ```bash
-composer require observera/laravel
-
-OR
-composer config repositories.observera vcs https://github.com/Observra/observera-laravel-sdk
-composer require observera/laravel:^1.0
-
+composer require observera/laravel:dev-main
 php artisan observera:install
 ```
+
+`composer.lock` pins the exact commit, so installs stay reproducible; you move
+forward only when you ask to:
+
+```bash
+composer update observera/laravel
+```
+
+Tracking a branch means there is no version gate — an update takes whatever
+`main` holds. Read the commits between your locked sha and `main` before
+updating a production app; `git log --oneline <locked-sha>..main` in this repo.
+
+> The `v1.0.0`–`v1.1.1` tags all declare `"version": "1.0.0"` in their own
+> `composer.json`, which Composer prefers over the tag name — so they are
+> indistinguishable to Composer and constraints like `^1.0` cannot move between
+> them. That field has been removed on `main`. Use `dev-main`, not the tags.
 
 Then set in `.env`:
 

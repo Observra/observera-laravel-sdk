@@ -2,7 +2,6 @@
     "name": "observera/laravel",
     "description": "Ship logs and telemetry from your Laravel app to Observera.",
     "type": "library",
-    "version": "1.0.0",
     "license": "MIT",
     "keywords": ["laravel", "observability", "logging", "monitoring", "observera"],
     "require": {

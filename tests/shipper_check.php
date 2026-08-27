@@ -105,4 +105,29 @@ $anon = $s7->sent[0]['logs'][0];
 assert($anon['user_email'] === '', 'anonymous log carries an empty email, not a missing key');
 assert(array_key_exists('user_id', $anon), 'the key is always present');
 
+// --- capBody: the semantics that broke twice in production ---
+//
+// v1.1.1 shipped without the "0 disables the cap" guard, so max_body=0 meant
+// mb_strcut($body, 0, 0) — every captured body became a bare truncation marker.
+$big = str_repeat('a', 1000);
+
+assert(LogShipper::capBody($big, 0) === $big, 'max_body 0 captures in full, it does NOT cut to zero bytes');
+assert(LogShipper::capBody($big, -1) === $big, 'a negative budget also disables the cap');
+assert(LogShipper::capBody($big, 1000) === $big, 'a body exactly at the budget is untouched');
+assert(LogShipper::capBody('', 0) === '', 'an empty body stays empty, no marker');
+
+$cut = LogShipper::capBody($big, 100);
+assert(str_starts_with($cut, str_repeat('a', 100)), 'the kept prefix is the budget');
+assert(str_contains($cut, 'stored 100 of 1000 bytes'), 'the marker reports kept AND original, not just original');
+
+// UTF-8: a byte budget landing mid-character must not split it, or json_encode
+// fails on the whole envelope and the batch is lost.
+$jp = str_repeat('シ', 10);                    // 3 bytes each = 30 bytes
+$jpCut = LogShipper::capBody($jp, 8);          // 8 bytes = 2 chars + 2 stray bytes
+assert(mb_check_encoding($jpCut, 'UTF-8'), 'a mid-character cut still yields valid UTF-8');
+assert(str_starts_with($jpCut, 'シシ'), 'the cut lands on a character boundary, not a byte one');
+
+// Invalid input bytes are sanitised for the same reason.
+assert(mb_check_encoding(LogShipper::capBody("ok\xC3\x28", 0), 'UTF-8'), 'invalid source bytes are sanitised');
+
 echo "shipper_check OK\n";

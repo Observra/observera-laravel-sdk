@@ -241,6 +241,47 @@ class LogShipper
     }
 
     /**
+     * Sanitise a payload for shipping, and cap it only if a cap is configured.
+     *
+     * `$max <= 0` means capture in full — nothing is trimmed. That is what you
+     * want when the payload IS the evidence (a third-party response you need to
+     * replay), and it is the default. This has to be spelled out because the
+     * obvious reading of `mb_strcut($body, 0, 0)` is an empty string, and a
+     * version that shipped without this guard stored bodies that were nothing
+     * but a truncation marker.
+     *
+     * Cutting, when a cap applies, is UTF-8 aware: `mb_strcut` trims to a byte
+     * budget WITHOUT splitting a multibyte character (byte `substr` would corrupt
+     * Japanese/emoji etc., and an invalid-UTF-8 tail makes json_encode fail on
+     * the whole envelope → lost data). Invalid bytes in the source are sanitised
+     * for the same reason.
+     *
+     * Lives here, not on the service provider, because it is framework-free and
+     * therefore testable — see tests/shipper_check.php.
+     */
+    public static function capBody(string $body, int $max): string
+    {
+        // Guarantee valid UTF-8 so the JSON envelope always encodes.
+        if (! mb_check_encoding($body, 'UTF-8')) {
+            $sub = mb_substitute_character();
+            mb_substitute_character(0xFFFD);
+            $body = mb_convert_encoding($body, 'UTF-8', 'UTF-8');
+            mb_substitute_character($sub);
+        }
+
+        // 0 (or negative) disables the cap — store everything.
+        if ($max <= 0 || strlen($body) <= $max) {
+            return $body;
+        }
+
+        // Both numbers, because one alone is ambiguous: "truncated 65970 bytes"
+        // reads as "65970 bytes were dropped" when it was the original size.
+        $kept = mb_strcut($body, 0, $max, 'UTF-8');
+
+        return $kept."\n… (truncated — stored ".strlen($kept).' of '.strlen($body).' bytes)';
+    }
+
+    /**
      * Drop unserialisable values (e.g. Throwable objects) so the JSON body is
      * always valid; keep an exception's class+message if present.
      */
