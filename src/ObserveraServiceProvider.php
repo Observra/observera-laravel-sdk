@@ -417,7 +417,11 @@ class ObserveraServiceProvider extends ServiceProvider
             return $body;
         }
 
-        return mb_strcut($body, 0, $max, 'UTF-8')."\n… (truncated ".strlen($body).' bytes)';
+        // Both numbers, because one alone is ambiguous: "truncated 65970 bytes"
+        // reads as "65970 bytes were dropped" when it was the original size.
+        $kept = mb_strcut($body, 0, $max, 'UTF-8');
+
+        return $kept."\n… (truncated — stored ".strlen($kept).' of '.strlen($body).' bytes)';
     }
 
     protected function recordException(LogShipper $shipper, RequestMonitor $monitor, Identity $identity, \Throwable $ex): void

@@ -32,8 +32,10 @@ OBSERVERA_KEY=obs_live_…              # Observera → project → SDK keys
 # OBSERVERA_IGNORE_PATHS=up,health,metrics
 
 # Max captured body size in bytes (outbound HTTP req/resp, job payloads). Larger
-# bodies are truncated on a UTF-8 boundary. Default 65536 (64 KB).
-# OBSERVERA_MAX_BODY=65536
+# bodies are truncated on a UTF-8 boundary. Default 0 = capture in full, because
+# a truncated third-party response is usually the one you needed to read. Set a
+# byte budget only if payload size becomes a real problem.
+# OBSERVERA_MAX_BODY=0
 ```
 
 That's it. `Log::error('Payment failed', ['order' => $id])` now appears in
