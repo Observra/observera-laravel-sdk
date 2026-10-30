@@ -1,0 +1,10 @@
+includes:
+    - vendor/larastan/larastan/extension.neon
+    - phpstan-baseline.neon
+
+parameters:
+    level: 5
+    paths:
+        - src
+    # The baseline holds the pre-existing findings; fixing one must not fail CI.
+    reportUnmatchedIgnoredErrors: false

@@ -25,12 +25,21 @@ class ObserveraMiddleware
     public function handle(Request $request, Closure $next): Response
     {
         $this->monitor->begin();
+        $this->identity->reset(); // Octane: this worker's previous request was someone else
+        // Nothing ships mid-request: the batch goes out in terminate, after the
+        // response has been sent (fastcgi_finish_request under FPM).
+        $this->shipper->deferred = true;
+        if (config('observera.trust_incoming_trace', true)) {
+            $this->monitor->continueTrace($request->header('traceparent'), $request->header('tracestate'));
+        }
 
         return $next($request);
     }
 
     public function terminate(Request $request, Response $response): void
     {
+        $this->shipper->deferred = false; // response is out: shipping may block now
+
         // Skip health checks / probes (container HEALTHCHECK, load balancers) —
         // otherwise they flood the request feed. Configurable via ignore_paths.
         $ignore = (array) config('observera.ignore_paths', []);
@@ -38,6 +47,16 @@ class ObserveraMiddleware
             return;
         }
 
+        try {
+            $this->report($request, $response);
+        } catch (\Throwable) {
+            // instrumentation must never break the app
+        }
+        $this->shipper->flush();
+    }
+
+    protected function report(Request $request, Response $response): void
+    {
         $route = $request->route();
         $start = defined('LARAVEL_START') ? LARAVEL_START : $request->server('REQUEST_TIME_FLOAT');
         $duration = $start ? (microtime(true) - (float) $start) * 1000 : 0;
@@ -60,13 +79,15 @@ class ObserveraMiddleware
             'duration_ms' => round($duration, 1),
             'db_ms' => round($this->monitor->dbTimeMs(), 1),
             'db_queries' => $this->monitor->dbQueries(),
+            'queries_dropped' => $this->monitor->queriesDropped, // past the per-request cap; the API ignores it today
             'memory_mb' => round(memory_get_peak_usage(true) / 1048576, 1),
             'trace_id' => $trace,
+            'parent_span_id' => $this->monitor->parentSpanId,
             'user_id' => $userId,
             'user_email' => $user['email'],
             'user_name' => $user['name'],
             'session_key' => $sessionKey,
-            'user_agent' => (string) $request->userAgent(),
+            'user_agent' => config('observera.send_pii', true) ? (string) $request->userAgent() : '',
         ]);
 
         // ---- release health: one session touch per request ----
@@ -76,7 +97,7 @@ class ObserveraMiddleware
             'session_key' => $sessionKey,
             'distinct_id' => $userId !== ''
                 ? 'user:'.$userId
-                : 'anon:'.substr(sha1(($request->ip() ?? '').'|'.((string) $request->userAgent())), 0, 16),
+                : 'anon:'.Identity::hash(($request->ip() ?? '').'|'.((string) $request->userAgent()), 16),
             'release' => (string) config('observera.release', ''),
             'status' => $status >= 500 ? 'crashed' : 'ok',
             'timestamp' => round(microtime(true) * 1000),
@@ -125,8 +146,6 @@ class ObserveraMiddleware
             ];
         }
         $this->shipper->recordSpans($spans);
-
-        $this->shipper->flush();
     }
 
     /**
@@ -137,11 +156,11 @@ class ObserveraMiddleware
     protected function sessionKey(Request $request, string $userId): string
     {
         if ($request->hasSession() && $request->session()->isStarted()) {
-            return 'web:'.$request->session()->getId();
+            return 'web:'.Identity::hash($request->session()->getId()); // never the raw (replayable) id
         }
         $base = $userId !== '' ? $userId : ($request->ip() ?? '').'|'.((string) $request->userAgent());
 
-        return 'api:'.substr(sha1($base), 0, 24);
+        return 'api:'.Identity::hash($base, 24);
     }
 
     protected function summariseSql(string $sql): string

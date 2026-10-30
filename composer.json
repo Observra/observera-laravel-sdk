@@ -9,9 +9,20 @@
         "illuminate/support": "^11.0|^12.0|^13.0",
         "guzzlehttp/guzzle": "^7.15.1"
     },
+    "require-dev": {
+        "larastan/larastan": "^3.9",
+        "orchestra/testbench": "^9.18|^10.12|^11.3",
+        "phpstan/phpstan": "^2.1",
+        "phpunit/phpunit": "^11.5.3|^12.0"
+    },
     "autoload": {
         "psr-4": {
             "Observera\\Laravel\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Observera\\Laravel\\Tests\\": "tests/"
         }
     },
     "extra": {
@@ -22,5 +33,10 @@
         }
     },
     "minimum-stability": "stable",
-    "prefer-stable": true
+    "prefer-stable": true,
+    "scripts": {
+        "test": "phpunit",
+        "analyse": "phpstan analyse --memory-limit=1G",
+        "check": "for f in tests/*_check.php; do OBSERVERA_LARAVEL_AUTOLOAD=vendor/autoload.php php -d zend.assertions=1 -d assert.exception=1 \"$f\" || exit 1; done"
+    }
 }

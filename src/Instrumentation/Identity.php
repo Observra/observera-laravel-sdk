@@ -40,20 +40,26 @@ class Identity
             /** @var Request $request */
             $request = app('request');
 
+            // "No user" is never memoised: it is often only true so far — a log
+            // line written before the auth middleware runs sees no user yet, and
+            // caching that blanked the email on the whole request row. The guard
+            // caches its own lookup, so asking again is cheap.
             if (! $request->hasSession() && ! $request->bearerToken() && ! $request->user()) {
-                return $this->resolved = $empty;
+                return $empty;
             }
 
             $user = $request->user();
 
             if (! $user) {
-                return $this->resolved = $empty;
+                return $empty;
             }
+
+            $pii = (bool) config('observera.send_pii', true); // false: id only
 
             return $this->resolved = [
                 'id' => (string) ($user->getAuthIdentifier() ?? ''),
-                'email' => (string) ($this->attr($user, config('observera.user_email_attribute', 'email')) ?? ''),
-                'name' => (string) ($this->attr($user, config('observera.user_name_attribute', 'name')) ?? ''),
+                'email' => $pii ? (string) ($this->attr($user, config('observera.user_email_attribute', 'email')) ?? '') : '',
+                'name' => $pii ? (string) ($this->attr($user, config('observera.user_name_attribute', 'name')) ?? '') : '',
             ];
         } catch (\Throwable) {
             // A broken guard must never break the app it is instrumenting.
@@ -61,10 +67,30 @@ class Identity
         }
     }
 
-    /** Forget the memo — the queue worker reuses the process across jobs. */
+    /**
+     * Forget the memo. Called at the start of every request and job: Octane and
+     * queue workers reuse the process, and a stale memo would attribute one
+     * user's activity to the next person served by the same worker.
+     */
     public function reset(): void
     {
         $this->resolved = null;
+    }
+
+    /**
+     * Keyed, truncated hash (HMAC-SHA256 with APP_KEY) for identifiers that must
+     * correlate but never leave the app raw: session ids, ip|ua, cache keys.
+     * Without the app key a plain sha256 hash would be brute-forceable for IPs.
+     */
+    public static function hash(string $value, int $length = 32): string
+    {
+        try {
+            $key = (string) config('app.key', '');
+        } catch (\Throwable) {
+            $key = '';
+        }
+
+        return substr(hash_hmac('sha256', $value, $key !== '' ? $key : 'observera'), 0, $length);
     }
 
     /** Read an attribute without assuming the user model has it. */

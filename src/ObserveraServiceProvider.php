@@ -3,11 +3,14 @@
 namespace Observera\Laravel;
 
 use Illuminate\Contracts\Http\Kernel as HttpKernel;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\Client\Events\ConnectionFailed;
 use Illuminate\Http\Client\Events\ResponseReceived;
 use Illuminate\Log\Events\MessageLogged;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\ServiceProvider;
+use Illuminate\Support\Str;
 use Observera\Laravel\Console\InstallCommand;
 use Observera\Laravel\Console\TestCommand;
 use Observera\Laravel\Http\ObserveraMiddleware;
@@ -17,6 +20,9 @@ use Observera\Laravel\Transport\Client;
 
 class ObserveraServiceProvider extends ServiceProvider
 {
+    /** Class of the job this worker is running, so jobs it dispatches know their origin. */
+    protected string $currentJob = '';
+
     public function register(): void
     {
         $this->mergeConfigFrom(__DIR__.'/../config/observera.php', 'observera');
@@ -38,7 +44,7 @@ class ObserveraServiceProvider extends ServiceProvider
                 (int) $config['batch_size'],
                 (string) $config['level'],
                 ($config['queue'] ?? null) ?: null, // empty string → inline
-                (string) ($config['queue_name'] ?? 'default'),
+                (string) ($config['queue_name'] ?? 'observera'),
             );
         });
     }
@@ -93,21 +99,43 @@ class ObserveraServiceProvider extends ServiceProvider
         $monitor = $this->app->make(RequestMonitor::class);
         $identity = $this->app->make(Identity::class);
 
+        // Keys whose values are masked in context / bodies / job metadata.
+        $keys = implode('|', array_filter(array_map('trim', (array) ($config['redact_keys'] ?? []))));
+        if ($keys !== '' && @preg_match('~(?:'.$keys.')~i', '') !== false) {
+            LogShipper::$redactKeys = $keys;
+        }
+
         // ---- logs (+ exceptions carried in log context) ----
         $this->app['events']->listen(MessageLogged::class, function (MessageLogged $e) use ($shipper, $monitor, $identity) {
-            $context = $e->context ?? [];
-            $context['trace_id'] ??= $monitor->traceId;
+            try {
+                $context = $e->context ?? [];
+                $context['trace_id'] ??= $monitor->traceId;
+                $message = (string) $e->message;
+                $ex = isset($context['exception']) && $context['exception'] instanceof \Throwable ? $context['exception'] : null;
 
-            $shipper->record($e->level, $e->message, $context, $identity->current());
+                // A reported QueryException logs its message, bindings interpolated — ship the ? form
+                if ($ex instanceof \Illuminate\Database\QueryException) {
+                    $message = str_replace($ex->getMessage(), LogShipper::exceptionMessage($ex), $message);
+                }
 
-            // Laravel reports exceptions as error logs with context.exception — split those out
-            if (isset($context['exception']) && $context['exception'] instanceof \Throwable) {
-                $this->recordException($shipper, $monitor, $identity, $context['exception']);
+                $shipper->record($e->level, $message, $context, $identity->current());
+
+                // Laravel reports exceptions as error logs with context.exception — split those out
+                if ($ex) {
+                    $this->recordException($shipper, $monitor, $identity, $ex);
+                }
+            } catch (\Throwable) {
+                // never throw into the app's logger
             }
         });
 
         // ---- HTTP requests (timing + per-query telemetry) ----
-        DB::listen(fn ($query) => $monitor->query($query->sql, $query->connectionName, (float) $query->time));
+        DB::listen(function ($query) use ($monitor) {
+            try {
+                $monitor->query($query->sql, (string) $query->connectionName, (float) $query->time);
+            } catch (\Throwable) {
+            }
+        });
 
         try {
             $this->app->make(HttpKernel::class)->pushMiddleware(ObserveraMiddleware::class);
@@ -115,71 +143,123 @@ class ObserveraServiceProvider extends ServiceProvider
             // console/queue contexts have no HTTP kernel — fine
         }
 
+        // ---- outbound trace propagation (W3C traceparent) ----
+        // A fresh span id per call; the http_out event reads it back off the
+        // sent request, so the downstream request (parent_span_id) links to it.
+        $http = $this->app->make(\Illuminate\Http\Client\Factory::class);
+        if (($config['propagate_trace'] ?? true) && method_exists($http, 'globalRequestMiddleware')) {
+            $deny = (array) ($config['propagate_trace_deny'] ?? []);
+            $allow = (array) ($config['propagate_trace_hosts'] ?? []);
+            $http->globalRequestMiddleware(function ($request) use ($monitor, $deny, $allow) {
+                try {
+                    $host = $request->getUri()->getHost();
+                    if ($monitor->traceId === '' || $request->hasHeader('traceparent')
+                        || ($allow !== [] && ! Str::is($allow, $host)) || ($deny !== [] && Str::is($deny, $host))) {
+                        return $request;
+                    }
+                    $traced = $request->withHeader('traceparent', '00-'.$monitor->traceId.'-'.RequestMonitor::newSpanId().'-01');
+
+                    return $monitor->traceState !== '' ? $traced->withHeader('tracestate', $monitor->traceState) : $traced;
+                } catch (\Throwable) {
+                    return $request; // header propagation must never fail the app's call
+                }
+            });
+        }
+
         // ---- outbound HTTP calls ----
-        $this->app['events']->listen(ResponseReceived::class, function (ResponseReceived $e) use ($shipper, $monitor) {
-            $url = (string) $e->request->url();
-            $host = parse_url($url, PHP_URL_HOST) ?: 'unknown';
-            $path = parse_url($url, PHP_URL_PATH) ?: '/';
-            $stats = method_exists($e->response, 'handlerStats') ? $e->response->handlerStats() : [];
-            $duration = round((float) (($stats['total_time'] ?? 0) * 1000), 1);
+        $this->app['events']->listen(ResponseReceived::class, function (ResponseReceived $e) use ($shipper, $monitor, $identity) {
+            try {
+                $url = (string) $e->request->url();
+                $host = parse_url($url, PHP_URL_HOST) ?: 'unknown';
+                $path = parse_url($url, PHP_URL_PATH) ?: '/';
+                $stats = method_exists($e->response, 'handlerStats') ? $e->response->handlerStats() : [];
+                $duration = round((float) (($stats['total_time'] ?? 0) * 1000), 1);
+                $respStream = $e->response->toPsrResponse()->getBody();
 
-            $shipper->recordHttpOut([
-                'service' => $host,
-                'host' => $host,
-                'method' => $e->request->method(),
-                'url' => $path,
-                'status' => $e->response->status(),
-                'duration_ms' => $duration,
-                'bytes' => strlen((string) $e->response->body()),
-                'req_body' => $this->capBody((string) $e->request->body()),
-                'resp_body' => $this->capBody((string) $e->response->body()),
-                'req_headers' => $this->maskHeaders($e->request->headers()),
-                'resp_headers' => $this->maskHeaders($e->response->headers()),
-                'trace_id' => $monitor->traceId,
-            ]);
+                $shipper->recordHttpOut([
+                    'service' => $host,
+                    'host' => $host,
+                    'method' => $e->request->method(),
+                    'url' => $path,
+                    'status' => $e->response->status(),
+                    'duration_ms' => $duration,
+                    'bytes' => (int) ($respStream->getSize() ?? $e->response->header('Content-Length')),
+                    'req_body' => $e->request->isMultipart()
+                        ? '[multipart '.(int) $e->request->toPsrRequest()->getBody()->getSize().' bytes]'
+                        : $this->captureBody($e->request->toPsrRequest()->getBody(), $e->request->header('Content-Type')[0] ?? ''),
+                    'resp_body' => $this->captureBody($respStream, $e->response->header('Content-Type')),
+                    'req_headers' => $this->maskHeaders($e->request->headers()),
+                    'resp_headers' => $this->maskHeaders($e->response->headers()),
+                    'trace_id' => $monitor->traceId,
+                    'span_id' => $this->spanIdOf($e->request),
+                    ...$this->userFields($identity),
+                ]);
 
-            // feed the span waterfall
-            $monitor->httpCall($host, $e->request->method().' '.$host.$path, $duration);
+                // feed the span waterfall
+                $monitor->httpCall($host, $e->request->method().' '.$host.$path, $duration);
+            } catch (\Throwable) {
+                // never break the app's HTTP call
+            }
         });
 
-        $this->app['events']->listen(ConnectionFailed::class, function (ConnectionFailed $e) use ($shipper, $monitor) {
-            $url = (string) $e->request->url();
-            $shipper->recordHttpOut([
-                'service' => parse_url($url, PHP_URL_HOST) ?: 'unknown',
-                'host' => parse_url($url, PHP_URL_HOST) ?: '',
-                'method' => $e->request->method(),
-                'url' => parse_url($url, PHP_URL_PATH) ?: '/',
-                'status' => 0,
-                'trace_id' => $monitor->traceId,
-            ]);
+        $this->app['events']->listen(ConnectionFailed::class, function (ConnectionFailed $e) use ($shipper, $monitor, $identity) {
+            try {
+                $url = (string) $e->request->url();
+                $shipper->recordHttpOut([
+                    'service' => parse_url($url, PHP_URL_HOST) ?: 'unknown',
+                    'host' => parse_url($url, PHP_URL_HOST) ?: '',
+                    'method' => $e->request->method(),
+                    'url' => parse_url($url, PHP_URL_PATH) ?: '/',
+                    'status' => 0,
+                    'trace_id' => $monitor->traceId,
+                    'span_id' => $this->spanIdOf($e->request),
+                    ...$this->userFields($identity),
+                ]);
+            } catch (\Throwable) {
+            }
         });
 
         // ---- queue jobs (run telemetry: duration, attempts, failures) ----
         // start times keyed by job id, set on JobProcessing and consumed on finish
         $jobStarts = [];
-        $this->app['events']->listen(\Illuminate\Queue\Events\JobProcessing::class, function ($e) use (&$jobStarts, $identity) {
+        $this->app['events']->listen(\Illuminate\Queue\Events\JobProcessing::class, function ($e) use (&$jobStarts, $identity, $monitor) {
             // long-lived worker: whoever was authenticated last job is not this one
             $identity->reset();
 
             if ($this->isOwnJob($e->job)) {
                 return; // don't instrument our own ship job → no telemetry feedback loop
             }
+            // Continue the dispatching request's trace, so the job's logs/HTTP
+            // calls join it (request → job is one trace). No stamp → its own
+            // trace, never the previous job's. Sync jobs run inside the
+            // dispatching request and already share its trace — leave it be.
+            // begin() also resets the query / http accumulators: a worker never
+            // runs the HTTP middleware, so without it they grow for its lifetime.
+            if ($e->connectionName !== 'sync') {
+                $monitor->begin();
+                $monitor->traceId = (string) ($e->job->payload()['observera']['trace_id'] ?? '') ?: $monitor->traceId;
+            }
             $jobStarts[$e->job->getJobId() ?: spl_object_id($e->job)] = microtime(true);
+            $this->currentJob = (string) $e->job->resolveName();
         });
-        $this->app['events']->listen(\Illuminate\Queue\Events\JobProcessed::class, function ($e) use ($shipper, &$jobStarts) {
+        $this->app['events']->listen(\Illuminate\Queue\Events\JobProcessed::class, function ($e) use ($shipper, $monitor, &$jobStarts) {
             if ($this->isOwnJob($e->job)) {
                 return;
             }
             $shipper->recordJob($this->jobEvent($e, 'ok', $jobStarts));
+            $this->shipQueries($shipper, $monitor, $e->connectionName !== 'sync');
+            $this->currentJob = '';
         });
-        $this->app['events']->listen(\Illuminate\Queue\Events\JobFailed::class, function ($e) use ($shipper, &$jobStarts) {
+        $this->app['events']->listen(\Illuminate\Queue\Events\JobFailed::class, function ($e) use ($shipper, $monitor, &$jobStarts) {
             if ($this->isOwnJob($e->job)) {
                 return;
             }
+            $this->currentJob = '';
             $ex = $e->exception ?? null;
             $shipper->recordJob($this->jobEvent($e, 'failed', $jobStarts, $ex
-                ? $ex::class.' — '.$ex->getMessage()
+                ? $ex::class.' — '.LogShipper::exceptionMessage($ex)
                 : ''));
+            $this->shipQueries($shipper, $monitor, $e->connectionName !== 'sync');
 
             // Ship failures immediately: a queue:work process never fires the app's
             // terminating callbacks, so a buffered failure would otherwise wait for
@@ -187,25 +267,150 @@ class ObserveraServiceProvider extends ServiceProvider
             $shipper->flush();
         });
 
-        // ---- cache operations (hit/miss/write/forget) ----
-        $this->app['events']->listen(\Illuminate\Cache\Events\CacheHit::class, function ($e) use ($shipper, $monitor) {
-            $shipper->recordCache($this->cacheOp('hit', $e, $monitor, $e->value ?? null));
-        });
-        $this->app['events']->listen(\Illuminate\Cache\Events\CacheMissed::class, function ($e) use ($shipper, $monitor) {
-            $shipper->recordCache($this->cacheOp('miss', $e, $monitor));
-        });
-        $this->app['events']->listen(\Illuminate\Cache\Events\KeyWritten::class, function ($e) use ($shipper, $monitor) {
-            $ttl = (int) ($e->seconds ?? 0);
-            $shipper->recordCache($this->cacheOp('write', $e, $monitor, $e->value ?? null, $ttl > 0 ? $ttl : -1));
-        });
-        $this->app['events']->listen(\Illuminate\Cache\Events\KeyForgotten::class, function ($e) use ($shipper, $monitor) {
-            $shipper->recordCache($this->cacheOp('forget', $e, $monitor));
+        // Stamp every dispatched job with when it was queued and which request /
+        // command / job queued it: gives a real queue wait time (dispatch → start)
+        // and links the job row to the request trace that caused it.
+        Queue::createPayloadUsing(function ($connection, $queue, $payload) use ($monitor) {
+            if (($payload['displayName'] ?? '') === \Observera\Laravel\Jobs\ShipEnvelope::class) {
+                return [];
+            }
+
+            return ['observera' => [
+                'queued_at' => microtime(true),
+                'trace_id' => $monitor->traceId,
+                'from' => $this->dispatchOrigin(),
+            ]];
         });
 
+        // An attempt that threw and will be retried: Laravel fires the exception
+        // first, then the release — keep the message for the `released` row.
+        $jobErrors = [];
+        $this->app['events']->listen(\Illuminate\Queue\Events\JobExceptionOccurred::class, function ($e) use (&$jobErrors) {
+            if ($this->isOwnJob($e->job)) {
+                return;
+            }
+            $jobErrors[$e->job->getJobId() ?: spl_object_id($e->job)] = $e->exception::class.' — '.LogShipper::exceptionMessage($e->exception);
+        });
+        $this->app['events']->listen(\Illuminate\Queue\Events\JobReleasedAfterException::class, function ($e) use ($shipper, $monitor, &$jobStarts, &$jobErrors) {
+            if ($this->isOwnJob($e->job)) {
+                return;
+            }
+            $key = $e->job->getJobId() ?: spl_object_id($e->job);
+            $shipper->recordJob($this->jobEvent($e, 'released', $jobStarts, $jobErrors[$key] ?? ''));
+            unset($jobErrors[$key]);
+            $this->shipQueries($shipper, $monitor, $e->connectionName !== 'sync');
+        });
+
+        // Killed by its timeout. The worker exits right after this event, so ship
+        // now. If the timeout also failed the job, JobFailed already recorded it.
+        if (class_exists(\Illuminate\Queue\Events\JobTimedOut::class)) {
+            $this->app['events']->listen(\Illuminate\Queue\Events\JobTimedOut::class, function ($e) use ($shipper, &$jobStarts) {
+                if ($this->isOwnJob($e->job) || $e->job->hasFailed()) {
+                    return;
+                }
+                $timeout = (int) ($e->job->payload()['timeout'] ?? 0);
+                $shipper->recordJob($this->jobEvent($e, 'timed_out', $jobStarts, 'Job exceeded its timeout'.($timeout ? " of {$timeout}s" : '')));
+                $shipper->flush();
+            });
+        }
+
+        // `queue:retry` on a failed job.
+        $this->app['events']->listen(\Illuminate\Queue\Events\JobRetryRequested::class, function ($e) use ($shipper) {
+            $payload = method_exists($e, 'payload') ? $e->payload() : (json_decode((string) ($e->job->payload ?? ''), true) ?: []);
+            $shipper->recordJob([
+                'job_id' => (string) ($payload['uuid'] ?? $e->job->uuid ?? ''),
+                'job_class' => (string) ($payload['displayName'] ?? 'UnknownJob'),
+                'queue' => (string) ($e->job->queue ?? 'default'),
+                'connection' => (string) ($e->job->connection ?? ''),
+                'status' => 'retry_requested',
+                'worker' => gethostname() ?: '',
+                'timestamp' => round(microtime(true) * 1000),
+            ]);
+        });
+
+        // A worker exiting — normal (max-time, restart signal) or not (memory,
+        // timeout kill). Frequent stops mean a worker that keeps dying.
+        $this->app['events']->listen(\Illuminate\Queue\Events\WorkerStopping::class, function ($e) use ($shipper) {
+            $reason = $e->reason ?? null;
+            $reason = $reason instanceof \BackedEnum ? (string) $reason->value : ($reason instanceof \UnitEnum ? $reason->name : '');
+            $status = (int) ($e->status ?? 0);
+
+            $shipper->record($status === 0 ? 'info' : 'warning', 'Queue worker stopped'.($reason !== '' ? ": {$reason}" : '')." (exit {$status})", [
+                'observera' => 'worker_stopped',
+                'exit_status' => $status,
+                'reason' => $reason,
+                'jobs_processed' => $e->jobsProcessed ?? null,
+                'memory_mb' => isset($e->memoryUsage) ? round($e->memoryUsage / 1048576, 1) : round(memory_get_usage(true) / 1048576, 1),
+                'worker' => gethostname() ?: '',
+                'pid' => getmypid(),
+            ]);
+            $shipper->flush();
+        });
+
+        // ---- N+1: Eloquent lazy loading on a model fetched as part of a list ----
+        // Laravel flags only models loaded in a multi-row result, so each hit is a
+        // real N+1. The handler records instead of throwing and Laravel still
+        // loads the relation — the app behaves exactly as before. Skipped when the
+        // app already enabled preventLazyLoading itself (it wants the exception).
+        // Installed once every provider has booted, so an AppServiceProvider that
+        // calls preventLazyLoading() itself has already run and keeps its exception.
+        $this->app->booted(function () use ($config, $shipper, $monitor, $identity) {
+            if (! ($config['capture_lazy_loading'] ?? true) || Model::preventsLazyLoading()) {
+                return;
+            }
+            $seen = [];
+            $seenTrace = null;
+            Model::preventLazyLoading();
+            Model::handleLazyLoadingViolationUsing(function ($model, string $relation) use ($shipper, $monitor, $identity, &$seen, &$seenTrace) {
+                if ($seenTrace !== $monitor->traceId) {
+                    $seen = [];
+                    $seenTrace = $monitor->traceId;
+                }
+                $key = $model::class.'::'.$relation;
+                if (isset($seen[$key])) {
+                    return; // once per request per relation — the loop would repeat it N times
+                }
+                $seen[$key] = true;
+
+                $shipper->record('warning', "N+1 query: lazy loading {$key}", [
+                    'observera' => 'lazy_loading',
+                    'model' => $model::class,
+                    'relation' => $relation,
+                    'origin' => $this->dispatchOrigin(),
+                    'trace_id' => $monitor->traceId,
+                ], $identity->current());
+            });
+        });
+
+        // ---- cache operations (hit/miss/write/forget) ----
+        // Rows are capped per request (LogShipper::MAX_CACHE) and never trigger a flush.
+        $cacheOps = [
+            \Illuminate\Cache\Events\CacheHit::class => 'hit',
+            \Illuminate\Cache\Events\CacheMissed::class => 'miss',
+            \Illuminate\Cache\Events\KeyWritten::class => 'write',
+            \Illuminate\Cache\Events\KeyForgotten::class => 'forget',
+        ];
+        foreach ($cacheOps as $event => $op) {
+            $this->app['events']->listen($event, function ($e) use ($shipper, $monitor, $op) {
+                try {
+                    if (str_starts_with((string) ($e->key ?? ''), 'observera:')) {
+                        return; // the SDK's own breaker state
+                    }
+                    $ttl = (int) ($e->seconds ?? 0);
+                    $shipper->recordCache($this->cacheOp($op, $e, $monitor, $e->value ?? null, $op === 'write' ? ($ttl > 0 ? $ttl : -1) : 0));
+                } catch (\Throwable) {
+                    // never throw into Cache::get
+                }
+            });
+        }
+
         // ---- scheduled tasks (cron) ----
+        // schedule:work is long-lived too: each task is its own unit (fresh trace, empty accumulators).
+        $this->app['events']->listen(\Illuminate\Console\Events\ScheduledTaskStarting::class, fn () => $monitor->begin());
         $this->app['events']->listen(\Illuminate\Console\Events\ScheduledTaskFinished::class, function ($e) use ($shipper, $monitor) {
             $exit = (int) ($e->task->exitCode ?? 0);
             $shipper->recordScheduled($this->scheduledRun($e->task, $exit === 0 ? 'ok' : 'failed', $monitor, round($e->runtime * 1000, 1), $exit));
+            $this->shipQueries($shipper, $monitor);
 
             if ($exit !== 0) {
                 $shipper->flush(); // same reason as job failures: schedule:work is long-lived
@@ -214,16 +419,20 @@ class ObserveraServiceProvider extends ServiceProvider
         $this->app['events']->listen(\Illuminate\Console\Events\ScheduledTaskFailed::class, function ($e) use ($shipper, $monitor) {
             $ex = $e->exception ?? null;
             $shipper->recordScheduled($this->scheduledRun($e->task, 'failed', $monitor, 0, 1,
-                $ex ? $ex::class.' — '.$ex->getMessage() : ''));
+                $ex ? $ex::class.' — '.LogShipper::exceptionMessage($ex) : ''));
+            $this->shipQueries($shipper, $monitor);
             $shipper->flush();
         });
         $this->app['events']->listen(\Illuminate\Console\Events\ScheduledTaskSkipped::class, function ($e) use ($shipper, $monitor) {
             $shipper->recordScheduled($this->scheduledRun($e->task, 'skipped', $monitor, 0, 0));
         });
 
-        // Flush at the end of the request/command/job.
-        $this->app->terminating(fn () => $shipper->flush());
-        register_shutdown_function(fn () => $shipper->flush());
+        // Flush at the end of the request/command/job (after the response is sent).
+        $this->app->terminating(function () use ($shipper) {
+            $shipper->deferred = false;
+            $shipper->flush();
+        });
+        register_shutdown_function(fn () => $shipper->flush(force: true));
     }
 
     /**
@@ -233,6 +442,14 @@ class ObserveraServiceProvider extends ServiceProvider
      * @param  array<string, float>  $starts
      * @return array<string, mixed>
      */
+    /** Span id from the `traceparent` actually sent on an outbound request ('' when none). */
+    protected function spanIdOf(object $request): string
+    {
+        $tp = (string) ($request->header('traceparent')[0] ?? '');
+
+        return preg_match('/^00-[0-9a-f]{32}-([0-9a-f]{16})-/', $tp, $m) ? $m[1] : '';
+    }
+
     /** Our own async ship job — never instrument it, or shipping telemetry ships telemetry forever. */
     protected function isOwnJob(object $job): bool
     {
@@ -248,6 +465,15 @@ class ObserveraServiceProvider extends ServiceProvider
 
         $payload = $job->payload();
         $data = $payload['data'] ?? [];
+        $stamp = $payload['observera'] ?? [];
+
+        // Queue wait = dispatch → this worker picking it up, minus any requested
+        // delay. First attempt only: a retry's payload still carries the original
+        // stamp, so its "wait" would include the earlier runs and backoff.
+        $waitMs = 0.0;
+        if ($started && isset($stamp['queued_at']) && (int) $job->attempts() <= 1) {
+            $waitMs = max(0.0, round(($started - (float) $stamp['queued_at']) * 1000 - (int) ($payload['delay'] ?? 0) * 1000, 1));
+        }
 
         return [
             'job_id' => (string) ($job->uuid() ?? $job->getJobId() ?? ''),
@@ -259,12 +485,95 @@ class ObserveraServiceProvider extends ServiceProvider
             'max_attempts' => (int) ($payload['maxTries'] ?? 0),
             'duration_ms' => $started ? round((microtime(true) - $started) * 1000, 1) : 0,
             'worker' => gethostname() ?: '',
-            'payload' => $this->capBody($job->getRawBody()),
+            'payload' => $this->jobPayload($job, $payload),
             'exception' => $exception,
             'backoff' => (string) ($payload['backoff'] ?? ''),
             'timeout' => (int) ($payload['timeout'] ?? 0),
+            'wait_ms' => $waitMs,
+            // the trace the job ran on (= the stamp's, or the fresh one begin() gave it) —
+            // its queries rows carry the same id
+            'trace_id' => (string) ($stamp['trace_id'] ?? '') ?: $this->app->make(RequestMonitor::class)->traceId,
+            'dispatched_from' => (string) ($stamp['from'] ?? ''),
             'timestamp' => round(microtime(true) * 1000),
         ];
+    }
+
+    /**
+     * What a job row carries as `payload`. By default a metadata summary only:
+     * the raw body holds the serialized command (constructor args — often
+     * emails, tokens, whole models). capture_job_payload restores the raw body,
+     * still redacted and capped.
+     */
+    protected function jobPayload(object $job, array $payload): string
+    {
+        if (config('observera.capture_job_payload', false)) {
+            $raw = json_decode((string) $job->getRawBody(), true) ?: [];
+            if (is_string($raw['data']['command'] ?? null)) {
+                $raw['data']['command'] = LogShipper::redactText($raw['data']['command']); // serialized command
+            }
+
+            return LogShipper::capBody(Client::encode(LogShipper::redact($raw)), $this->maxBody());
+        }
+
+        return Client::encode(LogShipper::redact(array_intersect_key($payload, array_flip(['displayName', 'uuid', 'maxTries', 'timeout', 'backoff', 'delay', 'retryUntil']))));
+    }
+
+    /**
+     * Queries recorded inside a job / scheduled task, shipped as `queries` rows on
+     * its trace, then dropped from memory. Sync jobs run inside a request, whose
+     * own terminate ships them.
+     */
+    protected function shipQueries(LogShipper $shipper, RequestMonitor $monitor, bool $own = true): void
+    {
+        if (! $own) {
+            return;
+        }
+        $trace = $monitor->traceId;
+        $shipper->recordQueries(array_map(fn ($q) => [
+            'sql' => $q['sql'],
+            'connection' => $q['connection'],
+            'duration_ms' => $q['duration_ms'],
+            'trace_id' => $trace,
+        ], $monitor->queries));
+        $monitor->queries = $monitor->httpCalls = [];
+    }
+
+    /**
+     * The user an outbound call was made on behalf of, so a failing third-party
+     * call says who it failed for.
+     *
+     * @return array{user_id: string, user_email: string, user_name: string}
+     */
+    protected function userFields(Identity $identity): array
+    {
+        $user = $identity->current();
+
+        return ['user_id' => $user['id'], 'user_email' => $user['email'], 'user_name' => $user['name']];
+    }
+
+    /** Where a job is being dispatched from: the running job, the HTTP route, or the artisan command. */
+    protected function dispatchOrigin(): string
+    {
+        if ($this->currentJob !== '') {
+            return 'job '.$this->currentJob;
+        }
+
+        // Octane serves HTTP from a CLI process, so check for a routed request
+        // before falling back to "artisan". Never let instrumentation throw.
+        try {
+            $request = $this->app->bound('request') ? $this->app['request'] : null;
+            if ($request && ($route = $request->route())) {
+                return $request->getMethod().' /'.ltrim($route->uri(), '/');
+            }
+        } catch (\Throwable) {
+            // no usable request in this context
+        }
+
+        if ($this->app->runningInConsole()) {
+            return trim('artisan '.($_SERVER['argv'][1] ?? ''));
+        }
+
+        return '';
     }
 
     /**
@@ -280,17 +589,13 @@ class ObserveraServiceProvider extends ServiceProvider
 
         $output = '';
         $file = $task->output ?? null;
-        // Follows the same max_body policy as every other payload — a truncated
-        // cron log is the one you cannot debug from.
+        // Only the tail (max_output bytes): the end of a cron log is where it failed.
         if (is_string($file) && $file !== '' && $file !== '/dev/null' && is_readable($file)) {
-            $limit = (int) config('observera.max_output', 0);
-            if ($limit <= 0 || filesize($file) <= $limit) {
-                $output = $this->capBody((string) @file_get_contents($file));
-            }
+            $output = LogShipper::redactText(self::tail($file, (int) config('observera.max_output', 65536)));
         }
 
         return [
-            'task' => (string) $name,
+            'task' => LogShipper::redactText((string) $name),
             'expression' => (string) $expr,
             'status' => $status,
             'duration_ms' => $durationMs,
@@ -301,6 +606,28 @@ class ObserveraServiceProvider extends ServiceProvider
             'trace_id' => $monitor->traceId,
             'timestamp' => round(microtime(true) * 1000),
         ];
+    }
+
+    /** Last $max bytes of a file (whole file when $max <= 0), UTF-8 safe, marked when cut. */
+    public static function tail(string $file, int $max): string
+    {
+        $size = (int) @filesize($file);
+        $fh = @fopen($file, 'rb');
+        if (! $fh) {
+            return '';
+        }
+        if ($max > 0 && $size > $max) {
+            fseek($fh, -$max, SEEK_END);
+        }
+        $data = (string) stream_get_contents($fh);
+        fclose($fh);
+
+        if ($max > 0 && $size > $max) {
+            $data = ltrim($data, "\x80..\xBF"); // drop a split leading character
+            $data = '… (truncated — last '.strlen($data).' of '.$size." bytes)\n".$data;
+        }
+
+        return LogShipper::capBody($data, 0);
     }
 
     /**
@@ -314,17 +641,35 @@ class ObserveraServiceProvider extends ServiceProvider
         $key = (string) ($e->key ?? '');
         $tags = property_exists($e, 'tags') && is_array($e->tags) ? $e->tags : [];
 
+        $pattern = $this->cacheKeyPattern($key);
+
+        // The raw key often embeds ids / emails / tokens: ship its shape plus a
+        // short keyed hash (tells keys apart, cannot be reversed).
         return [
             'op' => $op,
-            'key' => $key,
-            'key_pattern' => $this->cacheKeyPattern($key),
+            'key' => $pattern.'#'.Identity::hash($key, 12),
+            'key_pattern' => $pattern,
             'store' => (string) ($e->storeName ?? ''),
             'ttl' => $ttl,
-            'value_bytes' => $value !== null ? strlen(is_string($value) ? $value : serialize($value)) : 0,
+            'value_bytes' => $this->valueBytes($value),
             'tags' => implode(',', $tags),
             'trace_id' => $monitor->traceId,
             'timestamp' => round(microtime(true) * 1000),
         ];
+    }
+
+    /** Size of a cached value; 0 for objects (serializing a model can query / throw) or closures. */
+    protected function valueBytes(mixed $value): int
+    {
+        try {
+            return match (true) {
+                $value === null, is_object($value) => 0,
+                is_string($value) => strlen($value),
+                default => strlen(serialize($value)),
+            };
+        } catch (\Throwable) {
+            return 0;
+        }
     }
 
     /**
@@ -348,11 +693,8 @@ class ObserveraServiceProvider extends ServiceProvider
         return implode(':', $parts);
     }
 
-    /** Header names whose values are masked before shipping. */
-    protected const SENSITIVE_HEADERS = [
-        'authorization', 'proxy-authorization', 'cookie', 'set-cookie',
-        'x-api-key', 'x-observera-key', 'x-auth-token', 'stripe-signature',
-    ];
+    /** Header names whose values are masked before shipping (any name containing one of these). */
+    protected const SENSITIVE_HEADER = '/signature|auth|key|credential|session|jwt|subscription|token|secret|cookie|password/i';
 
     /**
      * Flatten + mask headers. Values for sensitive names (or any header whose
@@ -369,10 +711,11 @@ class ObserveraServiceProvider extends ServiceProvider
             $value = is_array($values) ? implode(', ', $values) : (string) $values;
             $lower = strtolower((string) $name);
 
-            $secret = in_array($lower, self::SENSITIVE_HEADERS, true)
-                || preg_match('/(token|secret|api[-_]?key|password)/', $lower);
+            if ($lower === 'location') {
+                $value = preg_replace('/\?.*$/s', '', $value); // signed redirect URLs carry tokens in the query
+            }
 
-            $out[$name] = $secret ? $this->maskValue($value) : $value;
+            $out[$name] = preg_match(self::SENSITIVE_HEADER, $lower) ? $this->maskValue($value) : $value;
         }
 
         return $out;
@@ -388,10 +731,35 @@ class ObserveraServiceProvider extends ServiceProvider
         return '••••••••(masked)';
     }
 
-    /** Resolve the configured byte budget and delegate — see LogShipper::capBody(). */
-    protected function capBody(string $body, ?int $max = null): string
+    protected function maxBody(): int
     {
-        return LogShipper::capBody($body, $max ?? (int) config('observera.max_body', 0));
+        return (int) config('observera.max_body', 8192);
+    }
+
+    /**
+     * Read an HTTP body for capture without disturbing it: only in-memory,
+     * seekable streams (never a `stream` response or a `sink` file), at most
+     * max_body bytes, position restored. Redacted, then capped.
+     */
+    protected function captureBody(\Psr\Http\Message\StreamInterface $stream, string $contentType): string
+    {
+        if (! config('observera.capture_bodies', true) || ! $stream->isSeekable()
+            || ! in_array($stream->getMetadata('uri'), ['php://temp', 'php://memory'], true)) {
+            return '';
+        }
+
+        $max = $this->maxBody();
+        $pos = $stream->tell();
+        $stream->rewind();
+        $body = $max > 0 ? $stream->read($max) : $stream->getContents();
+        $stream->seek($pos);
+
+        $size = (int) ($stream->getSize() ?? strlen($body));
+        $out = LogShipper::redactBody($body, $contentType, $max);
+
+        return $size > strlen($body) && ! str_contains($out, '(truncated')
+            ? $out."\n… (truncated — stored ".strlen($body).' of '.$size.' bytes)'
+            : $out;
     }
 
     protected function recordException(LogShipper $shipper, RequestMonitor $monitor, Identity $identity, \Throwable $ex): void
@@ -401,14 +769,14 @@ class ObserveraServiceProvider extends ServiceProvider
 
         $shipper->recordException([
             'class' => $ex::class,
-            'message' => $ex->getMessage(),
-            'file' => $ex->getFile(),
+            'message' => LogShipper::exceptionMessage($ex),
+            'file' => $this->relativePath($ex->getFile()),
             'line' => $ex->getLine(),
             'stack' => $this->buildStack($ex),
-            'context' => [
+            'context' => LogShipper::redact([
                 'php_version' => PHP_VERSION,
                 'server' => gethostname() ?: '',
-            ],
+            ]),
             'release' => (string) config('observera.release', ''),
             'trace_id' => $monitor->traceId,
             'user_id' => $user['id'],
@@ -429,6 +797,7 @@ class ObserveraServiceProvider extends ServiceProvider
     {
         $base = base_path();
         $frames = [];
+        $snippets = (bool) config('observera.capture_source', true);
 
         // the throw site first, then the call trace
         $raw = array_merge(
@@ -442,15 +811,18 @@ class ObserveraServiceProvider extends ServiceProvider
             $vendor = str_contains($file, '/vendor/') || ! str_starts_with($file, $base);
             $fn = trim(($f['class'] ?? '').($f['type'] ?? '').($f['function'] ?? ''));
 
+            $rel = $this->relativePath($file);
             $frame = [
-                'function' => $fn !== '' ? $fn.'()' : $file,
-                'file' => str_starts_with($file, $base) ? ltrim(substr($file, strlen($base)), '/') : $file,
+                'function' => $fn !== '' ? $fn.'()' : $rel,
+                'file' => $rel,
                 'line' => $line,
                 'vendor' => $vendor,
             ];
 
-            // source snippet for app frames only (±5 lines), bounded work
-            if (! $vendor && $line > 0 && is_readable($file)) {
+            // source snippet for app frames only (±5 lines), bounded work —
+            // never config (secrets), compiled views or .env files
+            if ($snippets && ! $vendor && $line > 0 && is_readable($file)
+                && ! preg_match('~^(config/|storage/framework/views/)|(^|/)\.env~', $rel)) {
                 $frame['code'] = $this->snippet($file, $line);
             }
 
@@ -458,6 +830,14 @@ class ObserveraServiceProvider extends ServiceProvider
         }
 
         return $frames;
+    }
+
+    /** Path relative to the app root (absolute paths reveal the server layout). */
+    protected function relativePath(string $file): string
+    {
+        $base = rtrim(base_path(), '/').'/';
+
+        return str_starts_with($file, $base) ? substr($file, strlen($base)) : $file;
     }
 
     /**
