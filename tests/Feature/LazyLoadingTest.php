@@ -8,7 +8,7 @@ use Observera\Laravel\Tests\Support\HPost;
 use Observera\Laravel\Tests\Support\HUser;
 use Observera\Laravel\Tests\TestCase;
 
-/** Port of the N+1 half of tests/queue_n1_check.php. */
+/** Eloquent N+1 (lazy loading) reporting. */
 class LazyLoadingTest extends TestCase
 {
     protected RequestMonitor $monitor;

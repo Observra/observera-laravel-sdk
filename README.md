@@ -245,11 +245,11 @@ What leaves your app, and what is done to it first:
 ## Test
 
 ```bash
-php tests/shipper_check.php   # framework-free self-check
-php tests/queue_n1_check.php  # queue + N+1 against a real Laravel app (borrows
-                              # ../observera-api/vendor, or OBSERVERA_LARAVEL_AUTOLOAD)
-php tests/trace_check.php     # W3C trace propagation (incoming, Http client, queue)
-php tests/identity_check.php  # user attribution across requests
-php tests/security_check.php  # redaction, SQL, transport, encrypted queue, hashing, PII
-php tests/reliability_check.php # breaker vs a slow/failing local ingest, limits, streams
+composer install
+composer test        # PHPUnit + Orchestra Testbench (same as vendor/bin/phpunit)
+composer analyse     # PHPStan (larastan), level 5
 ```
+
+`tests/Unit` is framework-free; `tests/Feature` boots a Testbench app (in-memory
+sqlite, database queue). `ReliabilityTest` starts its own `php -S` ingest on a
+free local port; its server-backed tests are skipped if that server cannot start.

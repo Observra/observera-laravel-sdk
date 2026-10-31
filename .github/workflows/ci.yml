@@ -45,11 +45,6 @@ jobs:
       - name: PHPUnit
         run: vendor/bin/phpunit
 
-      - name: Legacy self-check scripts
-        run: for f in tests/*_check.php; do echo "::group::$f"; php "$f" || exit 1; echo "::endgroup::"; done
-        env:
-          OBSERVERA_LARAVEL_AUTOLOAD: vendor/autoload.php
-
   phpstan:
     name: PHPStan (PHP 8.4 / Laravel 13)
     runs-on: ubuntu-latest

@@ -5,21 +5,26 @@ namespace Observera\Laravel\Tests;
 use Illuminate\Contracts\Http\Kernel as HttpKernel;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Testing\TestResponse;
 use Observera\Laravel\LogShipper;
 use Observera\Laravel\ObserveraServiceProvider;
 use Observera\Laravel\Tests\Support\FakeClient;
+use Observera\Laravel\Transport\Client;
 use Orchestra\Testbench\TestCase as Orchestra;
 
 /**
- * Same harness as the legacy tests/*_check.php scripts: in-memory sqlite, a
+ * Shared harness: in-memory sqlite, a
  * database queue, a dead ingest endpoint and a fake transport bound before the
  * provider boots (its boot() captures the LogShipper instance).
  */
 abstract class TestCase extends Orchestra
 {
     protected FakeClient $fake;
+
+    /** false = keep the provider-built LogShipper with a real transport (ReliabilityTest). */
+    protected bool $fakeTransport = true;
 
     protected function setUp(): void
     {
@@ -29,6 +34,11 @@ abstract class TestCase extends Orchestra
         Model::handleLazyLoadingViolationUsing(null);
 
         parent::setUp();
+
+        // Circuit breaker: the cache copy and Client's static fallback both survive
+        // between tests otherwise; breakerState() re-syncs the static from the (empty) cache.
+        Cache::forget(Client::BREAKER_KEY);
+        Client::breakerState();
     }
 
     protected function getPackageProviders($app): array
@@ -49,8 +59,12 @@ abstract class TestCase extends Orchestra
             'observera.queue' => null,
         ]);
 
-        // Runs after providers register, before they boot — same as the check scripts' $app->booting().
         $this->fake = new FakeClient;
+        if (! $this->fakeTransport) {
+            return;
+        }
+
+        // Runs after providers register, before they boot — so the provider captures the fake.
         $fake = $this->fake;
         $app->booting(fn () => $app->singleton(LogShipper::class, fn () => new LogShipper($fake, 'testing', 1000, 'debug', null)));
     }

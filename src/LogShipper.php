@@ -334,7 +334,7 @@ class LogShipper
      * for the same reason.
      *
      * Lives here, not on the service provider, because it is framework-free and
-     * therefore testable — see tests/shipper_check.php.
+     * therefore testable — see tests/Unit/LogShipperTest.php.
      */
     public static function capBody(string $body, int $max): string
     {

@@ -36,7 +36,6 @@
     "prefer-stable": true,
     "scripts": {
         "test": "phpunit",
-        "analyse": "phpstan analyse --memory-limit=1G",
-        "check": "for f in tests/*_check.php; do OBSERVERA_LARAVEL_AUTOLOAD=vendor/autoload.php php -d zend.assertions=1 -d assert.exception=1 \"$f\" || exit 1; done"
+        "analyse": "phpstan analyse --memory-limit=1G"
     }
 }

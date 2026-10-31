@@ -10,7 +10,7 @@ use Illuminate\Support\Facades\Schema;
 use Observera\Laravel\Tests\Support\AuthUser;
 use Observera\Laravel\Tests\TestCase;
 
-/** Port of tests/identity_check.php. */
+/** Identity attribution across auth timing and reused workers. */
 class IdentityTest extends TestCase
 {
     protected AuthUser $jane;

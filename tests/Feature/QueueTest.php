@@ -11,7 +11,7 @@ use Observera\Laravel\Tests\Support\FlakyJob;
 use Observera\Laravel\Tests\Support\OkJob;
 use Observera\Laravel\Tests\TestCase;
 
-/** Port of the queue half of tests/queue_n1_check.php. */
+/** Queue job stamping, wait time, trace linking and retries. */
 class QueueTest extends TestCase
 {
     protected function setUp(): void

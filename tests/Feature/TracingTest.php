@@ -10,7 +10,7 @@ use Observera\Laravel\Instrumentation\RequestMonitor;
 use Observera\Laravel\Tests\Support\TracedJob;
 use Observera\Laravel\Tests\TestCase;
 
-/** Port of tests/trace_check.php: W3C traceparent in, out, across the queue; deny-list respected. */
+/** W3C traceparent in, out, across the queue; deny-list respected. */
 class TracingTest extends TestCase
 {
     private const TID = '4bf92f3577b34da6a3ce929d0e0e4736';

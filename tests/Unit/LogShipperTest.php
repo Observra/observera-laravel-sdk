@@ -4,9 +4,10 @@ namespace Observera\Laravel\Tests\Unit;
 
 use Observera\Laravel\LogShipper;
 use Observera\Laravel\Tests\Support\FakeClient;
+use Observera\Laravel\Transport\Client;
 use PHPUnit\Framework\TestCase;
 
-/** Port of tests/shipper_check.php — framework-free. */
+/** LogShipper buffering, grouping and body capping — framework-free. */
 class LogShipperTest extends TestCase
 {
     private function shipper(FakeClient $fake, int $batchSize = 10, string $minLevel = 'debug'): LogShipper
@@ -131,5 +132,55 @@ class LogShipperTest extends TestCase
         $this->assertTrue(mb_check_encoding($jpCut, 'UTF-8'), 'a mid-character cut still yields valid UTF-8');
         $this->assertStringStartsWith('シシ', $jpCut, 'the cut lands on a character boundary');
         $this->assertTrue(mb_check_encoding(LogShipper::capBody("ok\xC3\x28", 0), 'UTF-8'), 'invalid source bytes are sanitised');
+    }
+
+    public function test_envelopes_are_bounded_by_event_count_and_bytes(): void
+    {
+        $parts = LogShipper::chunk(['logs' => array_fill(0, 2500, ['message' => 'x'])]);
+        $this->assertSame([1000, 1000, 500], array_map(fn ($c) => count($c['logs']), $parts), '≤ 1,000 events per envelope');
+
+        $parts = LogShipper::chunk(['logs' => array_fill(0, 40, ['message' => str_repeat('m', 1_000_000)])]);
+        $this->assertCount(3, $parts, '40MB of logs split into 3 envelopes');
+        $this->assertLessThanOrEqual(LogShipper::MAX_ENVELOPE_BYTES, max(array_map(fn ($c) => strlen(Client::encode($c)), $parts)), '≤ ~15MB per envelope');
+
+        $parts = LogShipper::chunk(['http_out' => [['resp_body' => str_repeat('r', 30_000_000), 'host' => 'h']]]);
+        $this->assertLessThan(70000, strlen($parts[0]['http_out'][0]['resp_body']), 'a single >20MB event is truncated, not sent whole');
+        $this->assertSame('h', $parts[0]['http_out'][0]['host'], 'truncation keeps the small fields');
+    }
+
+    public function test_deferred_buffer_is_hard_capped_and_never_flushes_mid_request(): void
+    {
+        $fake = new FakeClient;
+        $sh = new LogShipper($fake, 'testing', 50, 'debug');
+        $sh->deferred = true;
+        for ($i = 0; $i < 6000; $i++) {
+            $sh->record('info', "e$i");
+        }
+        $this->assertSame([], $fake->sent, 'deferred buffer never flushes mid-request');
+
+        $sh->flush(force: true);
+        $logs = array_merge(...array_map(fn ($e) => $e['logs'], $fake->sent));
+        $this->assertCount(5001, $logs, 'hard cap 5,000 (+1 drop notice)');
+        $this->assertStringContainsString('dropped 1000 events', end($logs)['message'], 'the rest dropped and reported once');
+        $this->assertLessThanOrEqual(1000, max(array_map(fn ($e) => count($e['logs']), $fake->sent)), 'forced flush still chunks ≤ 1,000');
+    }
+
+    public function test_cache_rows_do_not_count_towards_the_batch_size_trigger(): void
+    {
+        $fake = new FakeClient;
+        $sh = new LogShipper($fake, 'testing', 5, 'debug');
+        for ($i = 0; $i < 50; $i++) {
+            $sh->recordCache(['op' => 'hit', 'key' => "k$i"]);
+        }
+
+        $this->assertSame([], $fake->sent, 'cache rows excluded from the batch_size trigger');
+    }
+
+    public function test_queued_payload_is_scrubbed_to_valid_utf8(): void
+    {
+        $clean = LogShipper::utf8(['logs' => [['message' => "x\xC3\x28", 'ctx' => ['k' => "\xFF"]]]]);
+
+        $this->assertTrue(mb_check_encoding($clean['logs'][0]['message'], 'UTF-8'), 'message scrubbed to valid UTF-8');
+        $this->assertTrue(mb_check_encoding($clean['logs'][0]['ctx']['k'], 'UTF-8'), 'nested value scrubbed to valid UTF-8');
     }
 }
