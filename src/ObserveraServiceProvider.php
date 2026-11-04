@@ -12,7 +12,9 @@ use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Support\Str;
 use Observera\Laravel\Console\InstallCommand;
+use Observera\Laravel\Console\DeployCommand;
 use Observera\Laravel\Console\TestCommand;
+use Observera\Laravel\Support\Git;
 use Observera\Laravel\Http\ObserveraMiddleware;
 use Observera\Laravel\Instrumentation\Identity;
 use Observera\Laravel\Instrumentation\RequestMonitor;
@@ -55,22 +57,7 @@ class ObserveraServiceProvider extends ServiceProvider
      */
     protected function detectRelease(): string
     {
-        try {
-            $head = base_path('.git/HEAD');
-            if (! is_readable($head)) {
-                return '';
-            }
-            $ref = trim((string) file_get_contents($head));
-            if (str_starts_with($ref, 'ref:')) {
-                $refFile = base_path('.git/'.trim(substr($ref, 4)));
-
-                return is_readable($refFile) ? substr(trim((string) file_get_contents($refFile)), 0, 12) : '';
-            }
-
-            return substr($ref, 0, 12); // detached HEAD → the sha itself
-        } catch (\Throwable) {
-            return '';
-        }
+        return substr((string) Git::head(base_path())['sha'], 0, 12);
     }
 
     public function boot(): void
@@ -80,7 +67,7 @@ class ObserveraServiceProvider extends ServiceProvider
         ], 'observera-config');
 
         if ($this->app->runningInConsole()) {
-            $this->commands([InstallCommand::class, TestCommand::class]);
+            $this->commands([InstallCommand::class, TestCommand::class, DeployCommand::class]);
         }
 
         // Auto-resolve the release (for release health) once at boot if unset:

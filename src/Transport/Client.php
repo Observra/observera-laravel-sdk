@@ -122,20 +122,32 @@ class Client
      */
     public function post(array $logs): array
     {
-        if ($this->key === '') {
-            return ['ok' => false, 'status' => 0, 'error' => 'OBSERVERA_KEY is not set'];
-        }
         if ($logs === []) {
             return ['ok' => false, 'status' => 0, 'error' => 'no logs to send'];
+        }
+
+        return $this->postTo('intake/events', ['logs' => $logs]);
+    }
+
+    /**
+     * One reported request to an intake path (`observera:test`, `observera:deploy`).
+     * Bypasses the breaker on purpose: these are explicit, one-off calls.
+     *
+     * @return array{ok: bool, status: int, error: ?string}
+     */
+    public function postTo(string $path, array $payload): array
+    {
+        if ($this->key === '') {
+            return ['ok' => false, 'status' => 0, 'error' => 'OBSERVERA_KEY is not set'];
         }
         if ($this->insecure) {
             return ['ok' => false, 'status' => 0, 'error' => 'OBSERVERA_ENDPOINT must be https (plain http is allowed only for localhost/*.test/*.local)'];
         }
 
         try {
-            $res = $this->http->post('intake/events', [
+            $res = $this->http->post(ltrim($path, '/'), [
                 'headers' => $this->headers(),
-                'body' => self::encode(['logs' => $logs]),
+                'body' => self::encode($payload),
             ]);
 
             $status = $res->getStatusCode();

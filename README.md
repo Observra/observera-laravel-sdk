@@ -115,6 +115,40 @@ php artisan observera:test
 Sends one event and reports success/failure with the HTTP status — use it to
 debug key/endpoint issues.
 
+## Deployments
+
+Mark each deploy so Observera can show its impact (error rate and latency
+before vs after) and blame suspect deploys on new exceptions. Add one line as
+the **last step** of your deploy:
+
+```bash
+php artisan observera:deploy
+```
+
+It uses `OBSERVERA_KEY` — the environment's server key, which never expires —
+so the deploy lands in that key's environment. Release, commit, branch and
+author are detected from CI variables (GitHub Actions, GitLab, Bitbucket,
+CircleCI, Forge, Envoyer) or the `.git` checkout; override any of them:
+
+```bash
+php artisan observera:deploy v2.14.3 --branch=main --by=dilip --notes="hotfix" --duration=84
+```
+
+The release defaults to `OBSERVERA_RELEASE` → `APP_VERSION` → the short commit
+sha — the same value the SDK tags events with, so deploys line up with release
+health. A CI retry within 10 minutes is recognised as the same deploy. If
+Observera cannot be reached the command warns and exits 0 (a monitoring outage
+never fails your deploy); pass `--strict` to fail instead.
+
+Without the SDK (any language), POST the same JSON to
+`/intake/deployments` with the `x-observera-key` header:
+
+```bash
+curl -fsS -X POST "$OBSERVERA_ENDPOINT/intake/deployments" \
+  -H "x-observera-key: $OBSERVERA_KEY" -H "Content-Type: application/json" \
+  -d '{"release":"v2.14.3","git_sha":"'"$GIT_SHA"'","branch":"main","deployed_by":"ci"}'
+```
+
 ## How it works
 
 - Listens to Laravel's `MessageLogged` event — captures every channel, no
