@@ -290,6 +290,31 @@ class SecurityTest extends TestCase
         $this->assertSame('', $req['user_agent'] ?? 'x', 'send_pii=false drops the raw user agent');
     }
 
+    public function test_incoming_request_payload_and_headers_are_redacted(): void
+    {
+        Route::post('/login', fn () => response()->json(['token' => 'resp-secret-123', 'ok' => true]));
+        $kernel = $this->app->make(\Illuminate\Contracts\Http\Kernel::class);
+        $request = \Illuminate\Http\Request::create('/login', 'POST', server: [
+            'CONTENT_TYPE' => 'application/json', 'HTTP_AUTHORIZATION' => 'Bearer abc.def', 'HTTP_X_TRACE_NOTE' => 'hi',
+        ], content: json_encode(['email' => 'jane@shop.test', 'password' => 'hunter2']));
+        $response = $kernel->handle($request);
+        $kernel->terminate($request, $response);
+
+        $req = collect($this->sent('requests'))->last();
+        $this->assertStringContainsString('jane@shop.test', $req['req_body'] ?? '', 'request body captured');
+        $this->assertStringNotContainsString('hunter2', $req['req_body'] ?? '', 'password redacted');
+        $this->assertStringNotContainsString('resp-secret-123', $req['resp_body'] ?? '', 'response token redacted');
+        $this->assertStringContainsString('"ok"', $req['resp_body'] ?? '', 'response body captured');
+        $this->assertStringNotContainsString('abc.def', json_encode($req['req_headers'] ?? []), 'authorization masked');
+        $this->assertSame('hi', $req['req_headers']['x-trace-note'] ?? null, 'plain headers kept');
+
+        Route::get('/search', fn () => 'ok');
+        $this->visit('/search?q=shoes&api_key=k1');
+        $get = collect($this->sent('requests'))->last();
+        $this->assertStringContainsString('q=shoes', $get['req_body'] ?? '', 'GET records its query string');
+        $this->assertStringNotContainsString('k1', $get['req_body'] ?? '', 'query secrets redacted');
+    }
+
     public function test_cache_keys_are_hashed_and_value_bytes_never_throws(): void
     {
         Cache::put('orders:42:summary', 'abc', 60);

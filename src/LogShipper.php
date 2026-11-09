@@ -317,6 +317,44 @@ class LogShipper
         return $rank >= $min;
     }
 
+    /** Header names whose values are masked before shipping (any name containing one of these). */
+    public const SENSITIVE_HEADER = '/signature|auth|key|credential|session|jwt|subscription|token|secret|cookie|password/i';
+
+    /**
+     * Flatten + mask headers. Values for sensitive names (or any header whose
+     * name hints at a secret) are redacted before leaving the app.
+     *
+     * @param  array<string, array<int, string>|string>  $headers
+     * @return array<string, string>
+     */
+    public static function maskHeaders(array $headers): array
+    {
+        $out = [];
+
+        foreach ($headers as $name => $values) {
+            $value = is_array($values) ? implode(', ', $values) : (string) $values;
+            $lower = strtolower((string) $name);
+
+            if ($lower === 'location') {
+                $value = preg_replace('/\?.*$/s', '', $value); // signed redirect URLs carry tokens in the query
+            }
+
+            $out[$name] = preg_match(self::SENSITIVE_HEADER, $lower) ? self::maskValue($value) : $value;
+        }
+
+        return $out;
+    }
+
+    public static function maskValue(string $value): string
+    {
+        // keep a scheme prefix (e.g. "Bearer") + a short tail, redact the middle
+        if (preg_match('/^(\w+)\s+(.+)$/', $value, $m)) {
+            return $m[1].' '.'••••••••'.'(masked)';
+        }
+
+        return '••••••••(masked)';
+    }
+
     /**
      * Sanitise a payload for shipping, and cap it only if a cap is configured.
      *

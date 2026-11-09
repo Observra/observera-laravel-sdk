@@ -7,7 +7,9 @@ use Illuminate\Http\Request;
 use Observera\Laravel\Instrumentation\Identity;
 use Observera\Laravel\Instrumentation\RequestMonitor;
 use Observera\Laravel\LogShipper;
+use Symfony\Component\HttpFoundation\BinaryFileResponse;
 use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 /**
  * Times each HTTP request and, on terminate, ships the request event, the SQL
@@ -88,6 +90,11 @@ class ObserveraMiddleware
             'user_name' => $user['name'],
             'session_key' => $sessionKey,
             'user_agent' => config('observera.send_pii', true) ? (string) $request->userAgent() : '',
+            // same masking/redaction as outbound HTTP (third-party) capture
+            'req_headers' => LogShipper::maskHeaders($request->headers->all()),
+            'resp_headers' => LogShipper::maskHeaders($response->headers->all()),
+            'req_body' => $this->requestBody($request),
+            'resp_body' => $this->responseBody($response),
         ]);
 
         // ---- release health: one session touch per request ----
@@ -161,6 +168,51 @@ class ObserveraMiddleware
         $base = $userId !== '' ? $userId : ($request->ip() ?? '').'|'.((string) $request->userAgent());
 
         return 'api:'.Identity::hash($base, 24);
+    }
+
+    /**
+     * Incoming payload, redacted (redact_keys) and capped (max_body). Uploaded
+     * files are never read — only the plain form fields of a multipart post.
+     * A body-less request (GET) records its query string instead.
+     */
+    protected function requestBody(Request $request): string
+    {
+        if (! config('observera.capture_bodies', true)) {
+            return '';
+        }
+
+        $type = (string) $request->headers->get('Content-Type', '');
+        $max = (int) config('observera.max_body', 8192);
+
+        if (str_contains(strtolower($type), 'multipart/')) {
+            return LogShipper::redactBody(json_encode($request->request->all()) ?: '', 'application/json', $max);
+        }
+
+        $body = (string) $request->getContent();
+
+        if ($body === '' && ($query = (string) $request->server('QUERY_STRING', '')) !== '') {
+            return LogShipper::redactBody($query, 'application/x-www-form-urlencoded', $max);
+        }
+
+        return LogShipper::redactBody($body, $type, $max);
+    }
+
+    /** Text responses only: streamed/file downloads and binary types are skipped. */
+    protected function responseBody(Response $response): string
+    {
+        if (! config('observera.capture_bodies', true)
+            || $response instanceof StreamedResponse || $response instanceof BinaryFileResponse) {
+            return '';
+        }
+
+        $type = (string) $response->headers->get('Content-Type', '');
+        if ($type !== '' && ! preg_match('~json|xml|text/|javascript|x-www-form-urlencoded~i', $type)) {
+            return '';
+        }
+
+        $body = $response->getContent();
+
+        return is_string($body) ? LogShipper::redactBody($body, $type, (int) config('observera.max_body', 8192)) : '';
     }
 
     protected function summariseSql(string $sql): string

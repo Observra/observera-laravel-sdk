@@ -39,7 +39,8 @@ return [
     // (php artisan queue:work redis --queue=default,observera).
     'queue_name' => env('OBSERVERA_QUEUE_NAME', 'observera'),
 
-    // Capture outbound HTTP request/response bodies at all.
+    // Capture request/response bodies at all: outbound HTTP calls and incoming
+    // requests (GET query strings, form/JSON bodies; never uploaded files).
     'capture_bodies' => env('OBSERVERA_CAPTURE_BODIES', true),
 
     // Max captured body size in BYTES (outbound HTTP req/resp, opt-in job

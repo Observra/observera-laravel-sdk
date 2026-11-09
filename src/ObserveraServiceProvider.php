@@ -175,8 +175,8 @@ class ObserveraServiceProvider extends ServiceProvider
                         ? '[multipart '.(int) $e->request->toPsrRequest()->getBody()->getSize().' bytes]'
                         : $this->captureBody($e->request->toPsrRequest()->getBody(), $e->request->header('Content-Type')[0] ?? ''),
                     'resp_body' => $this->captureBody($respStream, $e->response->header('Content-Type')),
-                    'req_headers' => $this->maskHeaders($e->request->headers()),
-                    'resp_headers' => $this->maskHeaders($e->response->headers()),
+                    'req_headers' => LogShipper::maskHeaders($e->request->headers()),
+                    'resp_headers' => LogShipper::maskHeaders($e->response->headers()),
                     'trace_id' => $monitor->traceId,
                     'span_id' => $this->spanIdOf($e->request),
                     ...$this->userFields($identity),
@@ -678,44 +678,6 @@ class ObserveraServiceProvider extends ServiceProvider
         }
 
         return implode(':', $parts);
-    }
-
-    /** Header names whose values are masked before shipping (any name containing one of these). */
-    protected const SENSITIVE_HEADER = '/signature|auth|key|credential|session|jwt|subscription|token|secret|cookie|password/i';
-
-    /**
-     * Flatten + mask headers. Values for sensitive names (or any header whose
-     * name hints at a secret) are redacted before leaving the app.
-     *
-     * @param  array<string, array<int, string>|string>  $headers
-     * @return array<string, string>
-     */
-    protected function maskHeaders(array $headers): array
-    {
-        $out = [];
-
-        foreach ($headers as $name => $values) {
-            $value = is_array($values) ? implode(', ', $values) : (string) $values;
-            $lower = strtolower((string) $name);
-
-            if ($lower === 'location') {
-                $value = preg_replace('/\?.*$/s', '', $value); // signed redirect URLs carry tokens in the query
-            }
-
-            $out[$name] = preg_match(self::SENSITIVE_HEADER, $lower) ? $this->maskValue($value) : $value;
-        }
-
-        return $out;
-    }
-
-    protected function maskValue(string $value): string
-    {
-        // keep a scheme prefix (e.g. "Bearer") + a short tail, redact the middle
-        if (preg_match('/^(\w+)\s+(.+)$/', $value, $m)) {
-            return $m[1].' '.'••••••••'.'(masked)';
-        }
-
-        return '••••••••(masked)';
     }
 
     protected function maxBody(): int
