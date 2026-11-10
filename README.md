@@ -7,6 +7,8 @@ never slows or breaks your app.
 
 ## Install
 
+Requires PHP 8.2+ and Laravel 12 or 13 (Laravel 11 apps: stay on `^1.3`).
+
 Not on Packagist — installed straight from the repo. Add it to your app's
 `composer.json`:
 
