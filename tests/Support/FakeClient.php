@@ -23,6 +23,13 @@ final class FakeClient extends Client
         $this->sent[] = $envelope;
     }
 
+    public function sendTo(string $path, array $body): bool
+    {
+        $this->posted[] = ['path' => $path, 'payload' => $body];
+
+        return true;
+    }
+
     public function postTo(string $path, array $payload): array
     {
         $this->posted[] = ['path' => $path, 'payload' => $payload];

@@ -11,11 +11,13 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Support\Str;
+use Observera\Laravel\Console\AgentCommand;
 use Observera\Laravel\Console\InstallCommand;
 use Observera\Laravel\Console\DeployCommand;
 use Observera\Laravel\Console\TestCommand;
 use Observera\Laravel\Support\Git;
 use Observera\Laravel\Http\ObserveraMiddleware;
+use Observera\Laravel\Instrumentation\HostMetrics;
 use Observera\Laravel\Instrumentation\Identity;
 use Observera\Laravel\Instrumentation\RequestMonitor;
 use Observera\Laravel\Transport\Client;
@@ -67,7 +69,7 @@ class ObserveraServiceProvider extends ServiceProvider
         ], 'observera-config');
 
         if ($this->app->runningInConsole()) {
-            $this->commands([InstallCommand::class, TestCommand::class, DeployCommand::class]);
+            $this->commands([InstallCommand::class, TestCommand::class, DeployCommand::class, AgentCommand::class]);
         }
 
         // Auto-resolve the release (for release health) once at boot if unset:
@@ -414,6 +416,23 @@ class ObserveraServiceProvider extends ServiceProvider
             $shipper->recordScheduled($this->scheduledRun($e->task, 'skipped', $monitor, 0, 0));
         });
 
+        // ---- host metrics (Servers page) ----
+        // Sampled from every queue worker's loop, at most once per 15s per
+        // process; the API keeps one sample per host per interval. Never in a
+        // web request. Hosts without a worker: `php artisan observera:agent`.
+        if (($config['host']['metrics'] ?? true) && $this->app->runningInConsole() && HostMetrics::supported()) {
+            $hostClient = null;
+            $this->app['events']->listen(\Illuminate\Queue\Events\Looping::class, function () use (&$hostClient, $config) {
+                try {
+                    HostMetrics::tick($hostClient ??= new Client(
+                        $config['endpoint'], (string) $config['key'], (float) $config['timeout'], (float) $config['connect_timeout'],
+                    ));
+                } catch (\Throwable) {
+                    // never break the worker loop
+                }
+            });
+        }
+
         // Flush at the end of the request/command/job (after the response is sent).
         $this->app->terminating(function () use ($shipper) {
             $shipper->deferred = false;
@@ -589,7 +608,7 @@ class ObserveraServiceProvider extends ServiceProvider
             'exit_code' => $exit,
             'output' => $output,
             'exception' => $exception,
-            'host' => gethostname() ?: '',
+            'host' => HostMetrics::identity()[0],
             'trace_id' => $monitor->traceId,
             'timestamp' => round(microtime(true) * 1000),
         ];

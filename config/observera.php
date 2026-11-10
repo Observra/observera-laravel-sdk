@@ -35,6 +35,16 @@ return [
     // encrypted, retried briefly and then discarded (never left in failed_jobs).
     'queue' => env('OBSERVERA_QUEUE') ?: null,
 
+    // Host metrics for the Servers page (CPU, memory, disk, load, network from
+    // /proc, Linux only). Sampled by queue workers every 15s — no extra process.
+    // `name` overrides the host name (recommended in Docker, where the hostname
+    // is the container id); `role` labels it (web | worker | scheduler).
+    'host' => [
+        'metrics' => env('OBSERVERA_HOST_METRICS', true),
+        'name' => env('OBSERVERA_HOST_NAME'),
+        'role' => env('OBSERVERA_HOST_ROLE'),
+    ],
+
     // Dedicated queue for the ship job — make a worker listen to it
     // (php artisan queue:work redis --queue=default,observera).
     'queue_name' => env('OBSERVERA_QUEUE_NAME', 'observera'),

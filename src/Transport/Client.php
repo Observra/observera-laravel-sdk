@@ -85,14 +85,20 @@ class Client
     /** Send one envelope through the breaker. False = not delivered (dropped or failed). */
     public function send(array $envelope): bool
     {
-        if ($envelope === [] || $this->key === '' || $this->refuseInsecure() || self::breakerOpen()) {
+        return $this->sendTo('intake/events', $envelope);
+    }
+
+    /** Any intake path (e.g. OTLP host metrics), same breaker and best-effort rules as send(). */
+    public function sendTo(string $path, array $body): bool
+    {
+        if ($body === [] || $this->key === '' || $this->refuseInsecure() || self::breakerOpen()) {
             return false;
         }
 
         try {
-            $res = $this->http->post('intake/events', [
+            $res = $this->http->post(ltrim($path, '/'), [
                 'headers' => $this->headers(),
-                'body' => self::encode($envelope),
+                'body' => self::encode($body),
             ]);
             $status = $res->getStatusCode();
             if ($status >= 500 || $status === 429) {

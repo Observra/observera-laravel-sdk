@@ -149,6 +149,31 @@ curl -fsS -X POST "$OBSERVERA_ENDPOINT/intake/deployments" \
   -d '{"release":"v2.14.3","git_sha":"'"$GIT_SHA"'","branch":"main","deployed_by":"ci"}'
 ```
 
+## Server metrics
+
+CPU, memory, disk, load and network for the **Servers** page — no extra
+process. Every queue worker (`queue:work`, Horizon) samples its host from its
+own loop every 15s and sends it directly (never through the queue). Several
+workers or containers on one machine all send; Observera keeps one sample per
+host per interval. Linux only; elsewhere it silently does nothing.
+
+- **Docker / Kubernetes**: detected automatically. Containers on the same
+  machine report as one server (identified by the kernel boot id), and network
+  is left out because a container only sees its own traffic. Set
+  `OBSERVERA_HOST_NAME` (e.g. `s001`) for a readable name that also survives
+  reboots — otherwise the server shows as `host-xxxx` and can be renamed in the UI.
+- **No queue worker on a server** (web-only box): run the agent under Supervisor:
+
+  ```bash
+  php artisan observera:agent            # --interval=15, --once to test
+  ```
+
+- Turn it off with `OBSERVERA_HOST_METRICS=false`.
+
+Process breakdown (CPU by service) needs the OpenTelemetry Collector
+`hostmetrics` receiver with the `process` scraper, sent to
+`/intake/otlp/v1/metrics`.
+
 ## How it works
 
 - Listens to Laravel's `MessageLogged` event — captures every channel, no
@@ -266,6 +291,9 @@ What leaves your app, and what is done to it first:
 | `propagate_trace_hosts` | `OBSERVERA_PROPAGATE_TRACE_HOSTS` | empty = all | allow-list |
 | `propagate_trace_deny` | `OBSERVERA_PROPAGATE_TRACE_DENY` | empty | deny-list |
 | `trust_incoming_trace` | `OBSERVERA_TRUST_INCOMING_TRACE` | `true` | continue incoming `traceparent` |
+| `host.metrics` | `OBSERVERA_HOST_METRICS` | `true` | server metrics from queue workers (Linux) |
+| `host.name` | `OBSERVERA_HOST_NAME` | hostname (container: `host-xxxx`) | recommended in Docker |
+| `host.role` | `OBSERVERA_HOST_ROLE` | empty | `web` / `worker` / `scheduler` |
 
 ## Payload
 
